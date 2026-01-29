@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/server/db/client';
-import { telemetry, vbo_telemetry, laps } from '$lib/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { lap_telemetry } from '$lib/server/db/schema';
+import { eq, asc } from 'drizzle-orm';
 
 export const GET = async ({ params }) => {
     const sessionId = parseInt(params.id);
@@ -14,13 +14,13 @@ export const GET = async ({ params }) => {
 
     // We need to order by lap number?
     const t = await db.select({
-        lapNumber: vbo_telemetry.lapNumber,
-        lat: vbo_telemetry.lat,
-        long: vbo_telemetry.long
+        lapNumber: lap_telemetry.lapNumber,
+        lat: lap_telemetry.lat,
+        long: lap_telemetry.long
     })
-        .from(vbo_telemetry)
-        .where(eq(vbo_telemetry.sessionId, sessionId))
-        .orderBy(vbo_telemetry.lapNumber); // Ensure order
+        .from(lap_telemetry)
+        .where(eq(lap_telemetry.sessionId, sessionId))
+        .orderBy(asc(lap_telemetry.lapNumber)); // Ensure order
 
     if (t.length === 0) return json({ error: 'No data' }, { status: 404 });
 
