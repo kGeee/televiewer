@@ -1,6 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { db } from '$lib/server/db/client';
-import { share_links, sessions, laps, vbo_telemetry, drivers } from '$lib/server/db/schema';
+import { share_links, sessions, laps, lap_telemetry, drivers } from '$lib/server/db/schema';
 import { eq, asc } from 'drizzle-orm';
 import type { PageServerLoad } from './$types';
 
@@ -43,7 +43,7 @@ export const load: PageServerLoad = async ({ params }) => {
 	let lapsWithTelemetry = sessionLaps;
 
 	if (showTelemetry || showAi) {
-		const telemetryData = await db.select().from(vbo_telemetry).where(eq(vbo_telemetry.sessionId, session.id));
+		const telemetryData = await db.select().from(lap_telemetry).where(eq(lap_telemetry.sessionId, session.id));
 
 		console.log('[Share Page] Loading telemetry for session', session.id);
 		console.log('[Share Page] Found', telemetryData.length, 'telemetry records');
@@ -56,7 +56,6 @@ export const load: PageServerLoad = async ({ params }) => {
 
 			if (t) {
 				// Reconstruct the unified object for the frontend
-				const other = t.other as Record<string, any> | null;
 				cleanData = {
 					time: t.time || [],
 					distance: t.distance || [],
@@ -67,8 +66,7 @@ export const load: PageServerLoad = async ({ params }) => {
 					throttle: t.throttle || [],
 					brake: t.brake || [],
 					gear: t.gear || [],
-					steering: t.steering || [],
-					...(other || {})
+					steering: t.steering || []
 				};
 			}
 
