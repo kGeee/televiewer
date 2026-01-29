@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@theme {
+    --font-sans: "Outfit", sans-serif;
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+    color-scheme: light dark;
+}
+
+:root.dark {
+    color-scheme: dark;
+}
+
+/* Light mode (default) */
+body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Dark mode */
+:root.dark body {
+    @apply bg-slate-950 text-slate-50;
+    background-image: radial-gradient(at 0% 0%, rgba(17, 24, 39, 1) 0, transparent 50%),
+        radial-gradient(at 100% 0%, rgba(0, 0, 0, 1) 0, transparent 50%);
+}
+
+/* Smooth transitions for theme switching */
+*, *::before, *::after {
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.15s ease;
+}
+
+/* Disable transitions on page load to prevent flash */
+.no-transitions, .no-transitions * {
+    transition: none !important;
+}
