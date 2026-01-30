@@ -849,6 +849,17 @@
 						value={session.track}
 						class="text-4xl font-bold text-slate-900 dark:text-white bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 w-full mb-2"
 					/>
+                    
+                    <div class="mb-2">
+                        <label class="block text-xs uppercase text-slate-500 mb-1">Date</label>
+                        <input
+                            form="edit-session-form"
+                            type="date"
+                            name="date"
+                            value={new Date(session.date).toISOString().split('T')[0]}
+                            class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-sm text-slate-600 dark:text-slate-300"
+                        />
+                    </div>
 
 					<div class="mb-2">
 						<select

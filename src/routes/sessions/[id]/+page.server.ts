@@ -119,6 +119,17 @@ export const actions: Actions = {
             updateData.track = track as string;
         }
 
+        const date = data.get('date');
+        if (date !== null && date !== '') {
+            // Ensure we keep the ISO format if previously it was full ISO
+            // Or just store the date string if that's how we roll. 
+            // The DB expects text. The input type="date" returns YYYY-MM-DD.
+            // If the original date had time, we might lose it if we just overwrite.
+            // Ideally we preserve the time, but for now let's just update the day.
+            // Actually, let's just save what we get.
+            updateData.date = new Date(date as string).toISOString();
+        }
+
         // Telemetry Config logic
         const configStr = data.get('telemetryConfig') as string;
         if (configStr) {

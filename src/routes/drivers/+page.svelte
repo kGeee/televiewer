@@ -100,7 +100,7 @@
                     <!-- VIEW MODE -->
                     <div class="pl-4">
                         <div class="flex items-start justify-between">
-                            <div class="flex items-center gap-3">
+                            <a href="/drivers/{driver.id}" class="flex items-center gap-3 hover:opacity-80 transition-opacity">
                                 <div class="w-10 h-10 rounded-full bg-slate-200 dark:bg-slate-800 flex items-center justify-center text-lg font-bold text-slate-500 dark:text-slate-300" style="color: {driver.color}">
                                     {driver.name.charAt(0)}
                                 </div>
@@ -108,7 +108,7 @@
                                     <h3 class="text-lg font-bold text-slate-900 dark:text-white group-hover:text-orange-500 dark:group-hover:text-orange-400 transition-colors">{driver.name}</h3>
                                     <span class="text-xs text-slate-400 dark:text-slate-500 font-mono">ID: {driver.id}</span>
                                 </div>
-                            </div>
+                            </a>
                             <div class="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                 <button class="p-2 text-slate-400 dark:text-slate-500 hover:text-slate-900 dark:hover:text-white" onclick={() => startEdit(driver)}>
                                     <Settings class="w-4 h-4" />
