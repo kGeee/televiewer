@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy, untrack } from 'svelte';
+	import Hls from 'hls.js';
 
 	let { src, onPlay, onPause, onTimeUpdate, overlays = [], rotation = 0 } = $props<{
 		src: string;
@@ -23,6 +24,8 @@
 	let ytReady = $state(false);
 	let timeInterval: any;
 	let currentTime = $state(0);
+	
+	let hlsInstance: Hls | null = null;
 
     // Multi-part state
     type Partition = {
@@ -30,7 +33,7 @@
         duration: number; // seconds
         globalStart: number;
         globalEnd: number;
-        type: 'native' | 'youtube';
+        type: 'native' | 'youtube' | 'hls';
         ytId: string | null;
         hasError?: boolean;
     };
@@ -50,6 +53,11 @@
             totalDuration = 0;
             metadataLoadedCount = 0;
             currentPartitionIndex = 0;
+			
+			if (hlsInstance) {
+				hlsInstance.destroy();
+				hlsInstance = null;
+			}
 
             let urls: string[] = [];
             try {
@@ -65,12 +73,13 @@
             // Initialize partitions (durations unknown initially)
             partitions = urls.map(u => {
                 const ytId = getYouTubeID(u);
+				const isHls = u.includes('.m3u8') || u.includes('bunnycdn'); // Rough check
                 return {
                     url: u,
                     duration: 0,
                     globalStart: 0, 
                     globalEnd: 0,
-                    type: ytId ? 'youtube' : 'native',
+                    type: ytId ? 'youtube' : (isHls ? 'hls' : 'native'),
                     ytId
                 }
             });
@@ -91,10 +100,20 @@
         for (let i = 0; i < partitions.length; i++) {
             const part = partitions[i];
             
-            if (part.type === 'native') {
+            if (part.type === 'native' || part.type === 'hls') {
                 try {
-                    const duration = await getDurationForUrl(probeVideo, part.url);
-                    partitions[i].duration = duration;
+					if (part.type === 'hls') {
+						// For HLS, we can't easily probe with a temp video element without initializing HLS.
+						// We might trust the manifest or just use a default?
+						// For now, let's try to probe if it works, or fallback.
+						// Actually, HLS streams usually have explicit length in manifest, but let's see.
+						// If Bunny, we might need to fetch metadata separately? 
+						// Fallback: 0 duration and rely on player updates?
+						partitions[i].duration = 0; // Dynamic loading
+					} else {
+	                    const duration = await getDurationForUrl(probeVideo, part.url);
+	                    partitions[i].duration = duration;
+					}
                 } catch (e) {
                     console.warn('Failed to load metadata for', part.url);
                     partitions[i].duration = 0;
@@ -128,10 +147,8 @@
             const timeout = setTimeout(() => {
                 cleanup();
                 console.warn('Metadata load timed out for:', url);
-                // If it's a stream, it might just be slow. Let's try to return 0 or 1hr? 
-                // Returning 0 might be interpreted as empty/error.
                 resolve(0); 
-            }, 15000); // 15s timeout for transcoding startup
+            }, 10000);
 
             const cleanup = () => {
                 clearTimeout(timeout);
@@ -143,8 +160,7 @@
                 const d = videoEl.duration;
                 cleanup();
                 if (d === Infinity) {
-                     console.log('[UniversalPlayer] Duration is Infinity (Stream detected). Using fallback.');
-                     resolve(3600); // Fallback to 1 hour for stream?
+                     resolve(3600); // Fallback
                 } else {
                      resolve(d);
                 }
@@ -152,13 +168,13 @@
 
             videoEl.onerror = (e) => {
                 cleanup();
-                const err = (videoEl.error as any);
-                console.warn('Error loading video metadata:', url, err.code, err.message);
+				// @ts-ignore
+                const err = videoEl.error;
+                console.warn('Error loading video metadata:', url, err?.code, err?.message);
                 resolve(0); // Graceful fallback
             };
 
             videoEl.src = url;
-            // Ensure we trigger load
             videoEl.load();
         });
     }
@@ -171,24 +187,61 @@
         // Setup Player
         if (part.type === 'youtube' && part.ytId) {
             playerType = 'youtube';
+			if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
             loadYouTubeAPI(part.ytId, startTimeInPart);
         } else {
-            playerType = 'native';
+            playerType = 'native'; // Shared for native and HLS
             if (ytPlayer) {
 				try { ytPlayer.destroy(); } catch (e) {}
 				ytPlayer = null;
 			}
-            // Add a tick to let DOM update if switching from YT
+			
             setTimeout(() => {
                 if (nativeVideo) {
-                    nativeVideo.currentTime = startTimeInPart;
-                    // If we were playing, auto play? 
-                    // Let's assume paused unless told otherwise, but usually 'seek' involves playing if it was playing.
-                    // For now, just load.
+					if (part.type === 'hls') {
+						initHls(part.url, startTimeInPart);
+					} else {
+						if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+	                    nativeVideo.src = part.url;
+	                    nativeVideo.currentTime = startTimeInPart;
+					}
                 }
             }, 0);
         }
     }
+
+	function initHls(url: string, startTime: number) {
+		if (hlsInstance) {
+			hlsInstance.destroy();
+			hlsInstance = null;
+		}
+		if (Hls.isSupported() && nativeVideo) {
+			hlsInstance = new Hls();
+			hlsInstance.loadSource(url);
+			hlsInstance.attachMedia(nativeVideo);
+			hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+				if (nativeVideo) nativeVideo.currentTime = startTime;
+			});
+			// Update duration once metadata loaded
+			hlsInstance.on(Hls.Events.LEVEL_LOADED, (event, data) => {
+				if (data.details.totalduration > 0) {
+					// Update partition duration if we had 0
+					const p = partitions[currentPartitionIndex];
+					if (p && p.duration === 0) {
+						p.duration = data.details.totalduration;
+						// Recalculate timeline? Complex if multiple parts.
+						// For now, assume single HLS part usually.
+						totalDuration = p.duration; 
+						p.globalEnd = p.globalStart + p.duration;
+					}
+				}
+			});
+		} else if (nativeVideo && nativeVideo.canPlayType('application/vnd.apple.mpegurl')) {
+			// Native HLS (Safari)
+			nativeVideo.src = url;
+			nativeVideo.currentTime = startTime;
+		}
+	}
 
 	// Extract YouTube ID
 	function getYouTubeID(url: string) {
@@ -306,6 +359,10 @@
 
     onDestroy(() => {
         stopPolling();
+		if (hlsInstance) {
+			hlsInstance.destroy();
+			hlsInstance = null;
+		}
         if (ytPlayer && ytPlayer.destroy) {
             try { ytPlayer.destroy(); } catch(e){}
         }
@@ -361,6 +418,7 @@
                 height: nativeVideo.videoHeight,
                 readyState: nativeVideo.readyState,
                 type: 'native',
+				format: partitions[currentPartitionIndex]?.type,
                 partition: currentPartitionIndex + 1 + '/' + partitions.length
             }
         }
@@ -385,7 +443,6 @@
 	{#if playerType === 'native'}
 		<video
 			bind:this={nativeVideo}
-			src={partitions[currentPartitionIndex]?.url}
 			class="w-full h-full object-contain transition-transform duration-300"
             style="transform: rotate({rotation}deg);"
 			controls

@@ -36,6 +36,7 @@ export const sessions = pgTable('sessions', {
     // Video
     videoUrl: text('video_url'),
     originalVideoUrl: text('original_video_url'),
+    bunnyVideoId: text('bunny_video_id'),
     optimizationStatus: text('optimization_status').default('none'),
     videoOffset: doublePrecision('video_offset').default(0),
     fastestLapVideoUrl: text('fastest_lap_video_url'),

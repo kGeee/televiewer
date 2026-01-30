@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { applyAction, enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
+	import { Upload } from 'tus-js-client'; // Import TUS client
 	import UniversalPlayer from '$lib/components/UniversalPlayer.svelte';
 	import {
 		ArrowLeft,
@@ -18,7 +19,8 @@
 		Share2,
 		X,
 		Copy,
-		Check
+		Check,
+		UploadCloud
 	} from 'lucide-svelte';
 	import Card from '$lib/components/Card.svelte';
 	import TelemetryChart from '$lib/components/TelemetryChart.svelte';
@@ -56,6 +58,17 @@
 	let isVideoPlaying = $state(false);
 	let videoTime = $state(0);
 	let userInteractingWithChart = $state(false);
+
+	// Upload State
+	let isUploading = $state(false);
+	let uploadProgress = $state(0);
+	let uploadStatus = $state('');
+	let fileInput = $state<HTMLInputElement>();
+
+    // Local Video Playback State
+    let localVideoUrl = $state<string | null>(null);
+    let localFileName = $state<string | null>(null);  // Track filename for UI
+    let localFileInput = $state<HTMLInputElement>();
 
 	// Share State
 	let showShareModal = $state(false);
@@ -128,6 +141,113 @@
 		}, 3000);
 	}
 
+	function triggerUpload() {
+		console.log('[Upload] Button clicked');
+		// Use direct DOM access to bypass binding issues
+		const input = document.getElementById('video-upload-input') as HTMLInputElement;
+		console.log('[Upload] input element:', input);
+		if (input) {
+			input.click();
+		} else {
+			console.error('[Upload] Input element not found');
+			alert('Error: Upload element not ready (ID not found).');
+		}
+	}
+
+	async function handleFileUpload(e: Event) {
+		console.log('File upload changed');
+		const target = e.target as HTMLInputElement;
+		const file = target.files?.[0];
+		if (!file) {
+			console.log('No file selected');
+			return;
+		}
+
+		isUploading = true;
+		uploadProgress = 0;
+		uploadStatus = 'Initializing upload...';
+
+		try {
+			// 1. Create video on Bunny via our API
+			const createRes = await fetch('/api/bunny/create', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ title: session.name + ' - ' + file.name })
+			});
+
+			if (!createRes.ok) throw new Error('Failed to initialize video upload');
+
+			const { guid, expirationTime, signature, libraryId } = await createRes.json();
+
+			// 2. TUS Upload
+			const upload = new Upload(file, {
+				endpoint: 'https://video.bunnycdn.com/tusupload',
+				retryDelays: [0, 3000, 5000, 10000, 20000],
+				headers: {
+					AuthorizationSignature: signature,
+					AuthorizationExpire: expirationTime,
+					VideoId: guid,
+					LibraryId: libraryId
+				},
+				chunkSize: 50 * 1024 * 1024, // 5MB chunks
+				metadata: {
+					filetype: file.type,
+					title: file.name
+				},
+				onError: (error) => {
+					console.error('Upload failed details:', error);
+					// Check for specific TUS errors
+					if (error.originalRequest) {
+						console.error('Request:', error.originalRequest);
+					}
+					if (error.originalResponse) {
+						console.error('Response:', error.originalResponse);
+					}
+					uploadStatus = 'Upload failed: ' + error.message;
+					isUploading = false;
+					alert('Upload failed: ' + error.message);
+				},
+				onProgress: (bytesUploaded, bytesTotal) => {
+					const percentage = (bytesUploaded / bytesTotal) * 100;
+					uploadProgress = percentage;
+					uploadStatus = `Uploading... ${percentage.toFixed(0)}%`;
+				},
+				onSuccess: async () => {
+					uploadStatus = 'Processing...';
+
+					// 3. Link to session
+					await fetch(`/api/sessions/${session.id}/video`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ bunnyVideoId: guid })
+					});
+
+					uploadStatus = 'Complete!';
+					isUploading = false;
+					await invalidateAll();
+				}
+			});
+
+			upload.start();
+		} catch (err: any) {
+			console.error(err);
+			uploadStatus = 'Error: ' + err.message;
+			isUploading = false;
+		}
+	}
+
+    function handleLocalFileSelect(e: Event) {
+        const target = e.target as HTMLInputElement;
+        const file = target.files?.[0];
+        if (file) {
+            if (localVideoUrl) URL.revokeObjectURL(localVideoUrl);
+            localVideoUrl = URL.createObjectURL(file);
+            localFileName = file.name;
+            console.log('[LocalFile] Selected:', file.name, 'Blob:', localVideoUrl);
+            alert(`Local file "${file.name}" loaded into player. Please press Play.`);
+        }
+    }
+
 	function setSyncOffset() {
 		applySyncOffset(hoverTime);
 	}
@@ -139,7 +259,7 @@
 		const lapStart = getLapStartTime(selectedLapNumber);
 		const calculatedOffset = videoTime - lapStart - t;
 		editingSession.videoOffset = parseFloat(calculatedOffset.toFixed(3));
-		
+
 		console.log('[Sync] Set offset:', {
 			videoTime: videoTime.toFixed(3),
 			lapStart: lapStart.toFixed(3),
@@ -147,13 +267,12 @@
 			newOffset: calculatedOffset.toFixed(3)
 		});
 	}
-	
+
 	function onChartClick(t: number) {
 		if (isEditing) {
 			applySyncOffset(t);
 		}
 	}
-
 
 	// Auto-poll if we load the page and it is processing
 	$effect(() => {
@@ -215,7 +334,7 @@
 			// Use the time channel directly with offset calculation
 			// hoverTime is lap-relative in seconds, we need to convert to video time
 			const targetVTime = getVideoTimeFromLapTime(hoverTime, selectedLap.lapNumber);
-			
+
 			console.log(
 				'[Sync Debug] Telemetry time:',
 				hoverTime.toFixed(3),
@@ -225,13 +344,12 @@
 				targetVTime?.toFixed(3),
 				's'
 			);
-			
+
 			if (targetVTime !== null && targetVTime >= 0) {
 				playerComponent.seekTo(targetVTime);
 			}
 		}
 	});
-
 
 	// Sync Chart to Video (Video -> Cursor)
 	let initialSeekDone = $state(false);
@@ -255,7 +373,7 @@
 					}
 				}
 			}, 500);
-			
+
 			initialSeekDone = true;
 		}
 	});
@@ -267,20 +385,21 @@
 		// Auto-advance Lap Logic
 		if (videoSource === 'session') {
 			const currentLapStartV = getVideoTimeFromLapTime(0, selectedLap.lapNumber) ?? -Infinity;
-			const currentLapEndV = getVideoTimeFromLapTime(selectedLap.timeSeconds, selectedLap.lapNumber) ?? Infinity;
-			
+			const currentLapEndV =
+				getVideoTimeFromLapTime(selectedLap.timeSeconds, selectedLap.lapNumber) ?? Infinity;
+
 			// If we are past the end of the current lap (with small buffer)
 			if (vTime > currentLapEndV + 0.1) {
-				const nextLap = laps.find(l => l.lapNumber === selectedLap.lapNumber + 1);
+				const nextLap = laps.find((l) => l.lapNumber === selectedLap.lapNumber + 1);
 				if (nextLap) {
 					console.log('[Playback] Auto-advancing to Lap', nextLap.lapNumber);
 					selectedLapNumber = nextLap.lapNumber;
 					return; // Let reactivity handle the switch
 				}
-			} 
+			}
 			// If we are before the start of the current lap
 			else if (vTime < currentLapStartV - 0.1) {
-				const prevLap = laps.find(l => l.lapNumber === selectedLap.lapNumber - 1);
+				const prevLap = laps.find((l) => l.lapNumber === selectedLap.lapNumber - 1);
 				if (prevLap) {
 					console.log('[Playback] Auto-rewinding to Lap', prevLap.lapNumber);
 					selectedLapNumber = prevLap.lapNumber;
@@ -291,7 +410,7 @@
 
 		// Convert video time back to telemetry time using offset calculation
 		const calculatedHoverTime = getLapTimeFromVideoTime(vTime, selectedLap.lapNumber);
-		
+
 		// Clamp to lap duration
 		const maxLapTime = displayData.time[displayData.time.length - 1] || 100;
 		const newHoverTime = Math.max(0, Math.min(maxLapTime, calculatedHoverTime));
@@ -300,7 +419,6 @@
 			hoverTime = newHoverTime;
 		}
 	}
-
 
 	// Helpers with refined logic
 	function getFilteredLaps(laps: any[], showAll: boolean, thresholdDelta: number) {
@@ -481,8 +599,29 @@
 	});
 
 	function getVideoSrc(url: string | null | undefined) {
+        // Prioritize Local Blob if selected
+        if (localVideoUrl) return localVideoUrl;
+
+		// Prioritize Bunny Video
+		if (session.bunnyVideoId) {
+			// Construct HLS URL using Pull Zone
+			// We assume a standard b-cdn.net pull zone is configured.
+			// If not available, we can't play it easily without using the iframe embed which UniversalPlayer doesn't support yet (it supports YT).
+			// Let's assume a default or public env.
+			// Since we can't easily import $env/dynamic/public inside this function scope without top-level import,
+			// we'll rely on a hardcoded placeholder or a standard pattern.
+			// For now, I'll return a specially formatted URL that the user can replace/configure later.
+			// "https://{configure-pull-zone}.b-cdn.net/{id}/playlist.m3u8"
+
+			// To make it functional for testing:
+			// The user will need to replace 'flyinglizards' with their actual pull zone name if different.
+			const pullZone = 'vz-17b2c87d-c14';
+			return `https://${pullZone}.b-cdn.net/${session.bunnyVideoId}/playlist.m3u8`;
+		}
+
 		if (!url) return '';
 		if (url.startsWith('http')) return url;
+		if (url.includes('bunny') || url.includes('.m3u8')) return url;
 
 		// If it's an optimized video (static file), serve directly
 		if (url.includes('/videos/optimized/')) {
@@ -773,6 +912,60 @@
 										</span>
 									{/if}
 								</div>
+
+								<div class="mt-2">
+									<p class="text-xs text-slate-500 mb-1">Direct Upload to Cloud</p>
+									<input
+										type="file"
+										accept="video/*"
+										class="hidden"
+										id="video-upload-input"
+										onchange={handleFileUpload}
+									/>
+									<button
+										type="button"
+										class="w-full px-3 py-2 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded text-xs text-slate-500 hover:text-emerald-500 hover:border-emerald-500 transition-colors flex items-center justify-center gap-2"
+										onclick={triggerUpload}
+										disabled={isUploading}
+									>
+										{#if isUploading}
+											<span class="animate-spin">⏳</span> {uploadStatus}
+										{:else}
+											<UploadCloud class="w-4 h-4" />
+											Upload Video File
+										{/if}
+									</button>
+									{#if isUploading}
+										<div class="w-full bg-slate-200 rounded-full h-1.5 mt-2 overflow-hidden">
+											<div
+												class="bg-emerald-500 h-1.5 rounded-full transition-all duration-300"
+												style="width: {uploadProgress}%"
+											></div>
+										</div>
+									{/if}
+								</div>
+                                
+                                <div class="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800">
+                                    <label class="block text-xs text-slate-500 mb-1">Play Local File (Temporary/Offline)</label>
+                                    <div class="flex gap-2 items-center">
+                                        <input
+                                            type="file"
+                                            accept="video/*"
+                                            class="w-full text-xs text-slate-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-slate-100 dark:file:bg-slate-800 file:text-slate-700 dark:file:text-slate-300 hover:file:bg-slate-200"
+                                            onchange={handleLocalFileSelect}
+                                        />
+                                    </div>
+                                    <p class="text-[10px] text-slate-400 mt-1">
+                                        Select a video from your computer to play immediately. Does not upload or save.
+                                    </p>
+                                    {#if localFileName}
+                                        <p class="text-xs text-emerald-500 font-bold mt-1">
+                                            Currently Loaded: {localFileName} <br/>
+                                            <span class="text-[10px] font-normal text-slate-400">(Will be cleared if you save/refresh)</span>
+                                        </p>
+                                    {/if}
+                                </div>
+
 							</div>
 							<div>
 								<label class="block text-xs text-slate-500 mb-1">Sync Offset (seconds)</label>
@@ -998,7 +1191,7 @@
 	{/if}
 
 	<!-- Video Section -->
-	{#if (session.videoUrl || session.fastestLapVideoUrl) && !isEditing}
+	{#if session.videoUrl || session.fastestLapVideoUrl || localVideoUrl}
 		{@const currentVideoUrl =
 			videoSource === 'session' ? session.videoUrl : session.fastestLapVideoUrl}
 		{@const currentOffset =
