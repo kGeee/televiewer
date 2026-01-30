@@ -1,6 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { db } from '$lib/server/db/client';
-import { share_links, sessions, laps, lap_telemetry, drivers } from '$lib/server/db/schema';
+import { share_links, sessions, laps, lap_telemetry, drivers, tracks } from '$lib/server/db/schema';
 import { eq, asc } from 'drizzle-orm';
 import type { PageServerLoad } from './$types';
 
@@ -38,6 +38,18 @@ export const load: PageServerLoad = async ({ params }) => {
 	const showAi = link.config.showAi;
 
 	const sessionLaps = await db.select().from(laps).where(eq(laps.sessionId, session.id)).orderBy(asc(laps.lapNumber));
+
+	// Fetch track data for the map
+
+	const trackData = await db.query.tracks.findFirst({
+		where: eq(tracks.name, session.track)
+	});
+
+	// Augment session with track path data
+	const sessionWithTrack = {
+		...session,
+		trackPathData: trackData?.pathData || null
+	};
 
 	// Load telemetry data if needed (for both chart display and AI analysis)
 	let lapsWithTelemetry = sessionLaps;
@@ -83,7 +95,7 @@ export const load: PageServerLoad = async ({ params }) => {
 	}
 
 	return {
-		session,
+		session: sessionWithTrack,
 		driver,
 		laps: lapsWithTelemetry,
 

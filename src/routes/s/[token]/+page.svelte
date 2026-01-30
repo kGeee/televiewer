@@ -1,17 +1,13 @@
 <script lang="ts">
 	import UniversalPlayer from '$lib/components/UniversalPlayer.svelte';
-	import {
-		Timer,
-		User,
-		RefreshCw
-	} from 'lucide-svelte';
+	import { Timer, User, RefreshCw } from 'lucide-svelte';
 	import Card from '$lib/components/Card.svelte';
 	import TelemetryChart from '$lib/components/TelemetryChart.svelte';
 	import TrackMap from '$lib/components/TrackMap.svelte';
 	import { analyzeLap, calculateDerivedChannels, type CoachingTip } from '$lib/analysis/telemetry';
 
 	let { data } = $props();
-    const { permissions } = data;
+	const { permissions } = data;
 
 	// State
 	let hoverTime = $state(0);
@@ -22,7 +18,7 @@
 	// Video State
 	let videoSource = $state<'session' | 'fastest_lap'>('session');
 	let playerComponent = $state<UniversalPlayer>();
-    let videoRotation = $state(0);
+	let videoRotation = $state(0);
 	let isVideoPlaying = $state(false);
 	let userInteractingWithChart = $state(false);
 
@@ -34,7 +30,13 @@
 	});
 
 	$effect(() => {
-		if (playerComponent && !isVideoPlaying && userInteractingWithChart && displayData && selectedLap) {
+		if (
+			playerComponent &&
+			!isVideoPlaying &&
+			userInteractingWithChart &&
+			displayData &&
+			selectedLap
+		) {
 			// Priority 1: Use Native AVI Time
 			if (displayData.avitime && displayData.avitime.length > 0 && displayData.time) {
 				// Find index for current hoverTime
@@ -67,8 +69,8 @@
 			// Find closest data point with this AVI Time
 			let idx = -1;
 			for (let i = 0; i < displayData.avitime.length; i++) {
-                // Determine normalized time for this point
-                const ptTime = normalizeAviTime(displayData.avitime[i]);
+				// Determine normalized time for this point
+				const ptTime = normalizeAviTime(displayData.avitime[i]);
 				if (ptTime >= vTime) {
 					idx = i;
 					break;
@@ -84,9 +86,9 @@
 			const maxLapTime = displayData.time[displayData.time.length - 1] || 100;
 			const newHoverTime = Math.max(0, Math.min(maxLapTime, calculatedHoverTime));
 
-            if (!isNaN(newHoverTime)) {
-                hoverTime = newHoverTime;
-            }
+			if (!isNaN(newHoverTime)) {
+				hoverTime = newHoverTime;
+			}
 		}
 	}
 
@@ -211,11 +213,11 @@
 	const filteredTips = $derived(coachingTips.filter((tip) => enabledAnalysis[tip.type]));
 
 	$effect(() => {
-        if (!permissions.showAi) {
-            coachingTips = [];
-            return;
-        }
-        // Run analysis when selectedLap changes (and has data)
+		if (!permissions.showAi) {
+			coachingTips = [];
+			return;
+		}
+		// Run analysis when selectedLap changes (and has data)
 		if (selectedLap && selectedLap.telemetryData) {
 			isAnalyzing = true;
 			setTimeout(() => {
@@ -235,23 +237,30 @@
 		}
 	});
 
-    function getVideoSrc(url: string | null | undefined) {
-        if (!url) return '';
-        if (url.startsWith('http')) return url;
-        const isLocal = url.startsWith('/') || /^[a-zA-Z]:/.test(url);
-        if (isLocal) {
-            return `/api/video/stream?path=${encodeURIComponent(url)}`;
-        }
-        return url;
-    }
+	function getVideoSrc(url: string | null | undefined) {
+		// Prioritize Bunny Video
+		if (session.bunnyVideoId) {
+			const pullZone = 'vz-17b2c87d-c14';
+			return `https://${pullZone}.b-cdn.net/${session.bunnyVideoId}/playlist.m3u8`;
+		}
 
-    function normalizeAviTime(t: number) {
-        if (!t) return 0;
-        if (t > 100000) return t / 1000000;
-        return t;
-    }
+		if (!url) return '';
+		if (url.startsWith('http')) return url;
+		const isLocal = url.startsWith('/') || /^[a-zA-Z]:/.test(url);
+		if (isLocal) {
+			// Local paths won't work on shared links for other users, but might work for localhost dev
+			return `/api/video/stream?path=${encodeURIComponent(url)}`;
+		}
+		return url;
+	}
 
-    function getLapStartTime(lapNum: number) {
+	function normalizeAviTime(t: number) {
+		if (!t) return 0;
+		if (t > 100000) return t / 1000000;
+		return t;
+	}
+
+	function getLapStartTime(lapNum: number) {
 		let start = 0;
 		const sorted = [...laps].sort((a, b) => a.lapNumber - b.lapNumber);
 		for (const l of sorted) {
@@ -260,19 +269,21 @@
 		}
 		return start;
 	}
-	
+
 	function getVideoTimeFromLapTime(lapRelTime: number, lapNum: number): number | null {
-		const currentOffset = videoSource === 'session' ? session.videoOffset || 0 : session.fastestLapVideoOffset || 0;
+		const currentOffset =
+			videoSource === 'session' ? session.videoOffset || 0 : session.fastestLapVideoOffset || 0;
 		if (videoSource === 'session') {
 			const lapStart = getLapStartTime(lapNum);
 			return lapStart + lapRelTime + currentOffset;
 		} else {
-			return lapRelTime + currentOffset; 
+			return lapRelTime + currentOffset;
 		}
 	}
-	
+
 	function getLapTimeFromVideoTime(vTime: number, lapNum: number): number {
-		const currentOffset = videoSource === 'session' ? session.videoOffset || 0 : session.fastestLapVideoOffset || 0;
+		const currentOffset =
+			videoSource === 'session' ? session.videoOffset || 0 : session.fastestLapVideoOffset || 0;
 		if (videoSource === 'session') {
 			const lapStart = getLapStartTime(lapNum);
 			return vTime - currentOffset - lapStart;
@@ -282,7 +293,7 @@
 	}
 
 	const videoOverlays = $derived(
-		filteredTips.map(tip => {
+		filteredTips.map((tip) => {
 			const start = getVideoTimeFromLapTime(tip.startTime, selectedLap.lapNumber) ?? -100;
 			const end = getVideoTimeFromLapTime(tip.endTime, selectedLap.lapNumber) ?? -100;
 			return {
@@ -309,20 +320,20 @@
 					>
 				</div>
 
-                <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-2">{session.track}</h1>
-                {#if session.driverName}
-                    <div class="flex items-center gap-2 mb-2">
-                        <User class="w-4 h-4 text-slate-400 dark:text-slate-500" />
-                        <span class="text-sm font-semibold" style="color: {session.driverColor}"
-                            >{session.driverName}</span
-                        >
-                    </div>
-                {/if}
-                {#if session.notes}
-                    <p class="text-slate-500 dark:text-slate-400 italic font-light max-w-2xl">
-                        "{session.notes}"
-                    </p>
-                {/if}
+				<h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-2">{session.track}</h1>
+				{#if session.driverName}
+					<div class="flex items-center gap-2 mb-2">
+						<User class="w-4 h-4 text-slate-400 dark:text-slate-500" />
+						<span class="text-sm font-semibold" style="color: {session.driverColor}"
+							>{session.driverName}</span
+						>
+					</div>
+				{/if}
+				{#if session.notes}
+					<p class="text-slate-500 dark:text-slate-400 italic font-light max-w-2xl">
+						"{session.notes}"
+					</p>
+				{/if}
 			</div>
 			<div
 				class="flex gap-8 mt-6 md:mt-0 bg-white dark:bg-slate-900/50 p-6 rounded-xl border border-slate-200 dark:border-slate-800 backdrop-blur-sm shadow-sm dark:shadow-none"
@@ -358,12 +369,12 @@
 		</div>
 	</div>
 
-    {#if permissions.showVideo}
+	{#if permissions.showVideo}
 		<!-- Video Section -->
-		{#if (session.videoUrl || session.fastestLapVideoUrl)}
+		{#if session.videoUrl || session.fastestLapVideoUrl}
 			{@const currentVideoUrl =
 				videoSource === 'session' ? session.videoUrl : session.fastestLapVideoUrl}
-			
+
 			<div class="mb-8">
 				<Card title="Onboard Video">
 					{#if session.videoUrl && session.fastestLapVideoUrl}
@@ -404,131 +415,149 @@
 								overlays={permissions.showAi ? videoOverlays : []}
 							/>
 						{/key}
-                        
-                        {#if currentVideoUrl}
-                            <div class="absolute bottom-4 right-4 z-20">
-                                <button 
-                                    class="px-2 py-1 bg-black/50 text-white rounded text-xs hover:bg-black/70"
-                                    onclick={() => videoRotation = (videoRotation + 90) % 360}
-                                    title="Rotate Video"
-                                >
-                                    <RefreshCw class="w-4 h-4" />
-                                </button>
-                            </div>
-                        {/if}
+
+						{#if currentVideoUrl}
+							<div class="absolute bottom-4 right-4 z-20">
+								<button
+									class="px-2 py-1 bg-black/50 text-white rounded text-xs hover:bg-black/70"
+									onclick={() => (videoRotation = (videoRotation + 90) % 360)}
+									title="Rotate Video"
+								>
+									<RefreshCw class="w-4 h-4" />
+								</button>
+							</div>
+						{/if}
 					</div>
 				</Card>
 			</div>
 		{/if}
-    {/if}
+	{/if}
 
-    {#if permissions.showTelemetry}
+	{#if permissions.showTelemetry}
 		<!-- Telemetry Section -->
 		<div class="mb-8 space-y-4">
 			{#if selectedLap}
 				{#if displayData}
-                    <Card title="Telemetry Analysis">
-                        <div class="h-[300px] w-full relative">
-                            <TelemetryChart
-                                data={displayData}
-                                config={chartConfig}
-                                cursorTime={hoverTime}
-                                onHover={(t) => {
-                                    hoverTime = t;
-                                    userInteractingWithChart = true;
-                                }}
-                            />
-                        </div>
-                    </Card>
+					<Card title="Telemetry Analysis">
+						<div class="h-[300px] w-full relative">
+							<TelemetryChart
+								data={displayData}
+								config={chartConfig}
+								cursorTime={hoverTime}
+								onHover={(t) => {
+									hoverTime = t;
+									userInteractingWithChart = true;
+								}}
+							/>
+						</div>
+					</Card>
 				{:else}
-                    <Card title="Telemetry Analysis">
-                        <div class="text-center py-12 text-slate-500">
-                            Telemetry data not available for this lap or not loaded.
-                        </div>
-                    </Card>
+					<Card title="Telemetry Analysis">
+						<div class="text-center py-12 text-slate-500">
+							Telemetry data not available for this lap or not loaded.
+						</div>
+					</Card>
 				{/if}
 			{:else}
 				<div class="text-center py-12 text-slate-500">Select a lap to view telemetry</div>
 			{/if}
 		</div>
-    {/if}
-    
-    {#if permissions.showTelemetry}
-        <!-- Track Map -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div class="lg:col-span-1">
-                <Card title="Track Map">
-                    <div class="aspect-square bg-slate-100 dark:bg-slate-900 rounded-lg overflow-hidden relative">
-                        {#if session.trackConfig && (session.trackConfig.finishLine || session.trackConfig.sector1)}
-                             <!-- Use session track config if available -->
-                             <TrackMap 
-                                pathData={session.trackPathData} 
-                                {hoverTime} 
-                                lapData={displayData}
-                                finishLine={session.trackConfig.finishLine}
-                                sector1={session.trackConfig.sector1}
-                                sector2={session.trackConfig.sector2}
-                                width={400} 
-                                height={400} 
-                            />
-                        {:else if laps.length > 0}
-                             <!-- Fallback to generic -->
-                            <TrackMap pathData={null} {hoverTime} lapData={displayData} width={400} height={400} />
-                        {:else}
-                            <div class="flex items-center justify-center h-full text-slate-400">
-                                No Track Data
-                            </div>
-                        {/if}
-                    </div>
-                </Card>
-            </div>
-            
-            <div class="lg:col-span-2 space-y-6">
-                <Card title="Laps">
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-sm text-left">
-                            <thead class="text-xs uppercase bg-slate-50 dark:bg-slate-900 text-slate-500">
-                                <tr>
-                                    <th class="px-4 py-3">Lap</th>
-                                    <th class="px-4 py-3">Time</th>
-                                    <th class="px-4 py-3">S1</th>
-                                    <th class="px-4 py-3">S2</th>
-                                    <th class="px-4 py-3">S3</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
-                                {#each graphLaps as lap}
-                                    <tr 
-                                        class="hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer {selectedLapNumber === lap.lapNumber ? 'bg-blue-50 dark:bg-blue-900/20' : ''}"
-                                        onclick={() => {
-                                            selectedLapNumber = lap.lapNumber;
-                                            hoverTime = 0;
-                                        }}
-                                    >
-                                        <td class="px-4 py-3 font-medium">
-                                            {lap.lapNumber}
-                                            {#if !lap.valid}
-                                                <span class="ml-2 text-[10px] text-red-500 bg-red-100 dark:bg-red-900/30 px-1 rounded">INV</span>
-                                            {/if}
-                                        </td>
-                                        <td class="px-4 py-3 font-mono {bestLap?.lapNumber === lap.lapNumber ? 'text-emerald-600 font-bold' : ''}">
-                                            {formatLapTime(lap.timeSeconds)}
-                                        </td>
-                                        <td class="px-4 py-3 text-slate-500">{formatLapTime(lap.s1)}</td>
-                                        <td class="px-4 py-3 text-slate-500">{formatLapTime(lap.s2)}</td>
-                                        <td class="px-4 py-3 text-slate-500">{formatLapTime(lap.s3)}</td>
-                                    </tr>
-                                {/each}
-                            </tbody>
-                        </table>
-                    </div>
-                </Card>
-            </div>
-        </div>
-    {/if}
+	{/if}
 
-    {#if permissions.showAi && permissions.showTelemetry}
-        <!-- AI Coaching -->
+	{#if permissions.showTelemetry}
+		<!-- Track Map -->
+		<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+			<div class="lg:col-span-1">
+				<Card title="Track Map">
+					<div
+						class="aspect-square bg-slate-100 dark:bg-slate-900 rounded-lg overflow-hidden relative"
+					>
+						{#if session.trackConfig && (session.trackConfig.finishLine || session.trackConfig.sector1)}
+							<!-- Use session track config if available -->
+							<TrackMap
+								pathData={session.trackPathData}
+								{hoverTime}
+								lapData={displayData}
+								finishLine={session.trackConfig.finishLine}
+								sector1={session.trackConfig.sector1}
+								sector2={session.trackConfig.sector2}
+								width={400}
+								height={400}
+							/>
+						{:else if laps.length > 0}
+							<!-- Fallback to generic -->
+							<TrackMap
+								pathData={null}
+								{hoverTime}
+								lapData={displayData}
+								width={400}
+								height={400}
+							/>
+						{:else}
+							<div class="flex items-center justify-center h-full text-slate-400">
+								No Track Data
+							</div>
+						{/if}
+					</div>
+				</Card>
+			</div>
+
+			<div class="lg:col-span-2 space-y-6">
+				<Card title="Laps">
+					<div class="overflow-x-auto">
+						<table class="w-full text-sm text-left">
+							<thead class="text-xs uppercase bg-slate-50 dark:bg-slate-900 text-slate-500">
+								<tr>
+									<th class="px-4 py-3">Lap</th>
+									<th class="px-4 py-3">Time</th>
+									<th class="px-4 py-3">S1</th>
+									<th class="px-4 py-3">S2</th>
+									<th class="px-4 py-3">S3</th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+								{#each graphLaps as lap}
+									<tr
+										class="hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer {selectedLapNumber ===
+										lap.lapNumber
+											? 'bg-blue-50 dark:bg-blue-900/20'
+											: ''}"
+										onclick={() => {
+											selectedLapNumber = lap.lapNumber;
+											hoverTime = 0;
+										}}
+									>
+										<td class="px-4 py-3 font-medium">
+											{lap.lapNumber}
+											{#if !lap.valid}
+												<span
+													class="ml-2 text-[10px] text-red-500 bg-red-100 dark:bg-red-900/30 px-1 rounded"
+													>INV</span
+												>
+											{/if}
+										</td>
+										<td
+											class="px-4 py-3 font-mono {bestLap?.lapNumber === lap.lapNumber
+												? 'text-emerald-600 font-bold'
+												: ''}"
+										>
+											{formatLapTime(lap.timeSeconds)}
+										</td>
+										<td class="px-4 py-3 text-slate-500">{formatLapTime(lap.s1)}</td>
+										<td class="px-4 py-3 text-slate-500">{formatLapTime(lap.s2)}</td>
+										<td class="px-4 py-3 text-slate-500">{formatLapTime(lap.s3)}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				</Card>
+			</div>
+		</div>
+	{/if}
+	<!--
+     {#if permissions.showAi && permissions.showTelemetry}
+
         {#if filteredTips.length > 0}
             <div class="mt-8">
                 <Card title="AI Analysis">
@@ -549,7 +578,7 @@
                                         <h4 class="font-medium text-sm">{tip.title}</h4>
                                         <p class="text-xs text-slate-500 mt-1">{tip.description}</p>
                                         <div class="mt-2 flex gap-2">
-                                            <button 
+                                            <button
                                                 class="text-[10px] px-2 py-1 bg-slate-200 dark:bg-slate-800 rounded hover:bg-slate-300 dark:hover:bg-slate-700"
                                                 onclick={() => {
                                                     hoverTime = tip.startTime;
@@ -566,5 +595,5 @@
                 </Card>
             </div>
         {/if}
-    {/if}
+    {/if}  -->
 </div>

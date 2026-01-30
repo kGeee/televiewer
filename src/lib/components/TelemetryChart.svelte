@@ -499,7 +499,7 @@
 
 <div
 	bind:this={container}
-	class="w-full h-[600px] bg-white dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-800 p-4 relative shadow-sm dark:shadow-none"
+	class="w-full h-full bg-white dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-800 p-4 relative shadow-sm dark:shadow-none"
 >
 	<canvas></canvas>
 
