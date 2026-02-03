@@ -81,7 +81,7 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 
 		const primaryLap = primaryLaps.find((l) => l.time && l.time.length > 0);
 		const secondaryLap = secondarySession.laps.find(
-			(l) => l.telemetry.time.length > 0 && l.telemetry.speed.length > 0
+			(l) => l.telemetry?.time?.length > 0 && l.telemetry?.speed?.length > 0
 		);
 
 		if (primaryLap && secondaryLap) {
@@ -181,7 +181,7 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 					console.log('[Merge] Fallback cross-corr offset', globalOffsetSeconds.toFixed(3));
 
 					// Force matches so downstream merge proceeds. If secondary only has one long lap, match all primary laps to it.
-					if (secondarySession.laps.length === 1 && primaryLaps.length > 1) {
+					if (secondarySession.laps.length === 1 && primaryLaps.length > 1 && secondaryLap) {
 						matchResult = {
 							matches: primaryLaps.map((p, idx) => ({
 								primaryLapIndex: idx,
