@@ -153,9 +153,42 @@ export async function recalculateLaps(sessionId: number, config: NonNullable<typ
     // Iterate chunks (Laps) in order
     // Note: We assume chunks are ordered by lapNumber 1, 2, 3...
     // If there were gaps, this simple concatenation might be flawed, but usually vbo ingest is sequential.
+    let timeOffset = 0;
+    // let distOffset = 0; // If distance is reset per lap, we should offset it too. Assuming yes.
+
     for (const chunk of chunks) {
-        push(combined.time, chunk.time);
+        // Handle Time: Make it monotonic
+        if (chunk.time && chunk.time.length > 0) {
+            const adjustedTime = chunk.time.map(t => t + timeOffset);
+            push(combined.time, adjustedTime);
+
+            // Advance offset
+            // We assume the gap between laps is small/zero, or we use the last time.
+            // Ideally we'd know the gap. But simple stitching:
+            const lastT = chunk.time[chunk.time.length - 1];
+            // Fix: If chunk.time starts at 0, lastT is duration.
+            // Next lap starts at 0. So we add lastT to offset? 
+            // Better: use the max time of this chunk.
+            timeOffset += lastT + 0.05; // Add tiny 50ms gap to prevent overlap
+        }
+
+        // Handle Distance: Make it monotonic? 
+        // If distance is cumulative in DB, we don't need to.
+        // But if we normalized it (start at 0), we do.
+        // Let's assume we normalized it.
+        /* 
+        if (chunk.distance && chunk.distance.length > 0) {
+             const adjustedDist = chunk.distance.map(d => d + distOffset);
+             push(combined.distance, adjustedDist);
+             distOffset += chunk.distance[chunk.distance.length - 1];
+        } else {
+             push(combined.distance, chunk.distance);
+        }
+        */
+        // For now, keep distance as is unless we confirm it's broken. 
+        // Start/Finish logic uses LAT/LONG, not distance.
         push(combined.distance, chunk.distance);
+
         push(combined.lat, chunk.lat);
         push(combined.long, chunk.long);
         push(combined.speed, chunk.speed);
@@ -213,11 +246,13 @@ export async function recalculateLaps(sessionId: number, config: NonNullable<typ
 
     // 5. Update Database
     // Delete in order to satisfy FKs: Channels -> Laps.
-    // Also delete LapTelemetry (no FK to Laps, but logically linked)
-
-    if (existingLapIds.length > 0) {
-        await db.delete(telemetry_channels).where(inArray(telemetry_channels.lapId, existingLapIds));
-    }
+    // Use subquery to ensure we catch all laps for this session
+    await db.delete(telemetry_channels).where(
+        inArray(
+            telemetry_channels.lapId,
+            db.select({ id: laps.id }).from(laps).where(eq(laps.sessionId, sessionId))
+        )
+    );
     await db.delete(laps).where(eq(laps.sessionId, sessionId));
     await db.delete(lap_telemetry).where(eq(lap_telemetry.sessionId, sessionId));
 

@@ -4,6 +4,7 @@ import { sessions, laps, lap_telemetry, telemetry_sources, telemetry_channels } 
 import { eq } from 'drizzle-orm';
 
 import { splitTelemetryIntoLaps } from '$lib/analysis/geo';
+import { insertSessionData } from '$lib/server/db/utils';
 
 // Allow large payloads for telemetry upload (512kb default is insufficient)
 export const config = {
@@ -62,80 +63,13 @@ export const POST: RequestHandler = async ({ request }) => {
         const outlierThreshold = median * 1.15;
 
         // 2. Insert Laps & Telemetry
-        // Transaction to ensure data integrity
-        console.log(`[API] Starting DB transaction for ${lapsToInsert.length} laps...`);
         const startTime = Date.now();
-        await db.transaction(async (tx) => {
-            let processed = 0;
-            for (const lap of lapsToInsert) {
-                processed++;
-                if (processed % 5 === 0) console.log(`[API] Inserting lap ${processed}/${lapsToInsert.length}`);
 
-                const isOutlap = lap.lapNumber === 1;
-                // Support both time and timeSeconds formats
-                const lapTime = typeof lap.time === 'number' ? lap.time : lap.timeSeconds || 0;
+        // Import utility (dynamic or top-level? Top-level is better but for this tool I'll add import)
+        // I will need to add the import statement at the top separately.
+        // For now, I will just call it assuming I add import.
+        await insertSessionData(sessionId, lapsToInsert, sourceId, driverId || null);
 
-                const isOutlier = (lapTime > outlierThreshold) && !isOutlap;
-                // Mark as valid if it's not an outlap and not an outlier
-                // If it is an outlier, mark invalid
-                const isValid = !isOutlap && !isOutlier;
-
-                const lapResult = await tx.insert(laps).values({
-                    sessionId,
-                    driverId: driverId || null,
-                    lapNumber: lap.lapNumber,
-                    timeSeconds: lapTime,
-                    valid: isValid,
-                    hasTelemetry: true
-                }).returning({ id: laps.id });
-
-                const lapId = lapResult[0].id;
-
-                // Telemetry
-                const {
-                    time, distance, lat, long, speed, rpm, throttle, brake, gear, steering,
-                    other, // Extract explicitly
-                    ...rest // Extract any other top-level keys
-                } = lap.telemetry;
-
-                // Combine 'other' bucket and any loose keys, avoiding nesting
-                // If 'other' already exists, use it. Failing that, use 'rest'.
-                const otherChannels = other || rest;
-
-                await tx.insert(lap_telemetry).values({
-                    sessionId,
-                    lapNumber: lap.lapNumber,
-                    time: time || [],
-                    distance: distance || [],
-                    lat: lat || [],
-                    long: long || [],
-                    speed: speed || [],
-                    rpm: rpm || [],
-                    throttle: throttle || [],
-                    brake: brake || [],
-                    gear: gear || [],
-                    steering: steering || []
-                });
-
-                if (otherChannels && Object.keys(otherChannels).length > 0) {
-                    const channelsToInsert = Object.entries(otherChannels).map(([key, data]) => ({
-                        sourceId,
-                        lapId,
-                        name: key,
-                        unit: null,
-                        data: data as number[]
-                    }));
-
-                    // Helper: only insert if data is valid array
-                    const validChannels = channelsToInsert.filter(c => Array.isArray(c.data) && c.data.length > 0);
-
-                    if (validChannels.length > 0) {
-                        // Drizzle batch insert (Postgres allow multiple values)
-                        await tx.insert(telemetry_channels).values(validChannels);
-                    }
-                }
-            }
-        });
         const duration = Date.now() - startTime;
         console.log(`[API] DB transaction complete in ${duration}ms`);
 

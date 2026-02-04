@@ -3,7 +3,7 @@
 **Project:** Televiewer — Multi-Source Telemetry Merge & Data-Dense Dashboard
 **Core Value:** Drivers can see exactly what happened at every point on track — unified telemetry from multiple data sources on one timeline, with video sync and coaching analysis.
 **Created:** 2026-01-31
-**Depth:** Standard (8 phases across 2 milestones)
+**Depth:** Standard (9 phases across 2 milestones)
 
 ## Overview
 
@@ -108,11 +108,37 @@ Enables drivers to upload secondary telemetry files and merge data from multiple
 
 ---
 
+#### Phase 5: Parquet Telemetry Storage
+
+**Goal:** Telemetry data is stored in Parquet files instead of JSON blobs in SQLite, enabling columnar access, compression, and faster reads for large datasets.
+
+**Dependencies:** Phase 4 (integration & edge cases)
+
+**Requirements:**
+
+- INFRA-04: Migrate telemetry storage from JSON blobs in SQLite to Parquet files on disk
+- INFRA-05: Read/write telemetry data via Parquet with equivalent or better performance
+- INFRA-06: Migrate existing sessions from JSON to Parquet format
+
+**Success Criteria:**
+
+1. New telemetry imports write Parquet files to disk with per-lap granularity (one file per lap or per session)
+2. All telemetry read paths (charts, track map, analysis, merge) consume Parquet instead of JSON blobs
+3. Existing sessions with JSON telemetry are migrated to Parquet via one-time migration script
+4. Parquet storage achieves smaller on-disk size than equivalent JSON blobs (target: 50%+ compression)
+5. Telemetry read performance is equivalent or better than JSON blob parsing for typical session loads
+
+**Plans:**
+
+- [ ] TBD (run /gsd:plan-phase 5 to break down)
+
+---
+
 ### Milestone 2: Data-Dense Dashboard
 
 Redesigns UI for data-dense visualization with lap overlay comparison, following Grafana/Bloomberg aesthetic.
 
-#### Phase 5: Foundation & Refactoring
+#### Phase 6: Foundation & Refactoring
 
 **Goal:** Session detail page is decomposed into testable components with design system foundation in place.
 
@@ -137,11 +163,11 @@ Redesigns UI for data-dense visualization with lap overlay comparison, following
 
 ---
 
-#### Phase 6: Session Detail Redesign
+#### Phase 7: Session Detail Redesign
 
 **Goal:** Session detail page displays data-dense layout with synchronized charts, map, and video.
 
-**Dependencies:** Phase 5 (component extraction and design system)
+**Dependencies:** Phase 6 (component extraction and design system)
 
 **Requirements:**
 
@@ -160,11 +186,11 @@ Redesigns UI for data-dense visualization with lap overlay comparison, following
 
 ---
 
-#### Phase 7: Lap Overlay & Visualization
+#### Phase 8: Lap Overlay & Visualization
 
 **Goal:** Drivers can overlay multiple laps on same chart and toggle channel visibility for comparison analysis.
 
-**Dependencies:** Phase 6 (redesigned session detail)
+**Dependencies:** Phase 7 (redesigned session detail)
 
 **Requirements:**
 
@@ -183,11 +209,11 @@ Redesigns UI for data-dense visualization with lap overlay comparison, following
 
 ---
 
-#### Phase 8: Advanced Features & Persistence
+#### Phase 9: Advanced Features & Persistence
 
 **Goal:** Drivers can save custom dashboard layouts and access enhanced coaching insights with persistent sidebar.
 
-**Dependencies:** Phase 7 (lap overlay and visualization)
+**Dependencies:** Phase 8 (lap overlay and visualization)
 
 **Requirements:**
 
@@ -215,12 +241,13 @@ Redesigns UI for data-dense visualization with lap overlay comparison, following
 | 2 - Multi-Source Upload         | Pending | 3            | 0/0   | -      |
 | 3 - Merge Pipeline              | Pending | 4            | 0/0   | -      |
 | 4 - Integration & Edge Cases    | Pending | 3            | 0/0   | -      |
-| 5 - Foundation & Refactoring    | Pending | 6            | 0/0   | -      |
-| 6 - Session Detail Redesign     | Pending | 4            | 0/0   | -      |
-| 7 - Lap Overlay & Visualization | Pending | 4            | 0/0   | -      |
-| 8 - Advanced Features           | Pending | 5            | 0/0   | -      |
+| 5 - Parquet Telemetry Storage   | Pending | 3            | 0/0   | -      |
+| 6 - Foundation & Refactoring    | Pending | 6            | 0/0   | -      |
+| 7 - Session Detail Redesign     | Pending | 4            | 0/0   | -      |
+| 8 - Lap Overlay & Visualization | Pending | 4            | 0/0   | -      |
+| 9 - Advanced Features           | Pending | 5            | 0/0   | -      |
 
-**Total:** 31 requirements across 8 phases (2 milestones)
+**Total:** 34 requirements across 9 phases (2 milestones)
 
 ---
 
@@ -228,14 +255,14 @@ Redesigns UI for data-dense visualization with lap overlay comparison, following
 
 ```
 Milestone 1 (Merge):
-Phase 1 → Phase 2 → Phase 3 → Phase 4
+Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5
 
 Milestone 2 (Dashboard):
-Phase 5 → Phase 6 → Phase 7 → Phase 8
+Phase 6 → Phase 7 → Phase 8 → Phase 9
 
 (Milestones are independent and can be executed in parallel or sequentially)
 ```
 
 ---
 
-_Last updated: 2026-01-31_
+_Last updated: 2026-02-03_

@@ -117,35 +117,54 @@
 	});
 
 	// Sync Current Time Marker
+	let lastTimeIdx = 0;
+	
 	$effect(() => {
 		if (!map || !data || !data.time) return;
+		
+		// Optimization: Stateful search
+		// If time moved forward, start searching from last index
+		// If time jumped backward (seek), reset search or search from 0
+		let startIdx = 0;
+		if (currentTime >= (data.time[lastTimeIdx] || -1)) {
+			startIdx = lastTimeIdx;
+		} else {
+			// Backward seek
+			startIdx = 0;
+		}
 
-		// Find index
+		// Calculate end index for sanity check (e.g. look ahead 500 points max? or just loop)
+		// Since we run this potentially every frame, we want to find it quickly.
+		// Assuming 100Hz data, 1 second is 100 points.
+		
 		let idx = -1;
-		// Optimization: binary search or assumes sorted? data.time is usually sorted.
-		// Simple linear scan for now as typical requestAnimationFrame handles this fine for < 100k points
-		// actually for large sets, this needs to be fast.
-		// Let's assume monotonic.
-		// Find first time >= currentTime
-		// If currentTime is close to last found index, search from there?
-		// For simplicity:
-		idx = data.time.findIndex((t: number) => t >= currentTime);
+		const len = data.time.length;
+		
+		for (let i = startIdx; i < len; i++) {
+			if (data.time[i] >= currentTime) {
+				idx = i;
+				break;
+			}
+		}
+		
+		if (idx !== -1) {
+			lastTimeIdx = idx;
+			if (data.lat[idx] && data.long[idx]) {
+				const lat = data.lat[idx];
+				const lng = data.long[idx];
 
-		if (idx !== -1 && data.lat[idx] && data.long[idx]) {
-			const lat = data.lat[idx];
-			const lng = data.long[idx];
-
-			if (!positionMarker) {
-				positionMarker = L.circleMarker([lat, lng], {
-					radius: 6,
-					fillColor: '#f97316',
-					color: 'white',
-					weight: 2,
-					opacity: 1,
-					fillOpacity: 1
-				}).addTo(map);
-			} else {
-				positionMarker.setLatLng([lat, lng]);
+				if (!positionMarker) {
+					positionMarker = L.circleMarker([lat, lng], {
+						radius: 6,
+						fillColor: '#f97316',
+						color: 'white',
+						weight: 2,
+						opacity: 1,
+						fillOpacity: 1
+					}).addTo(map);
+				} else {
+					positionMarker.setLatLng([lat, lng]);
+				}
 			}
 		}
 	});

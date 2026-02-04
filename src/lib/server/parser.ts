@@ -6,6 +6,7 @@ export interface ParsedSession {
         date: string;
         columns?: string[]; // Raw columns for debugging
         channelMapping?: Record<string, string>; // Mapped columns
+        units?: Record<string, string>; // Channel units extracted from header (e.g. { speed: 'km/h', nmot: '1/min' })
     };
     laps: ParsedLap[];
 }
@@ -28,7 +29,7 @@ export interface ParsedLap {
     };
 }
 
-export function parseBoschExport(content: string): ParsedSession {
+export function parseBoschExport(content: string, customMapping?: Record<string, string>): ParsedSession {
     // PERFORMANCE: Pre-allocate and process more efficiently
     const lines = content.split('\n');
     const metadata = { track: 'Unknown', type: 'Unknown', date: new Date().toISOString() };
@@ -62,6 +63,14 @@ export function parseBoschExport(content: string): ParsedSession {
     let currentLapNum = 1;
     let lastLapTime = 0;
 
+    // Helper to find column index (Lazy init after headers found)
+    let findCol: (key: string, candidates: string[]) => number = () => -1;
+    let unitMap: Record<string, string> = {};
+    let usedMapping: Record<string, string> = { ...customMapping };
+
+    // Mappings definitions - to be used once headers are parsed
+    let colMap: any = {};
+
     for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -85,9 +94,72 @@ export function parseBoschExport(content: string): ParsedSession {
 
         // 2. Header Parsing
         if (!headerFound) {
-            if (trimmed.startsWith('xtime')) {
-                headers = trimmed.split(/\s+/).filter(h => !h.startsWith('[') && !h.endsWith(']'));
+            // Case insensitive check for 'xtime'
+            if (trimmed.toLowerCase().startsWith('xtime')) {
+                // Parse headers and units from tokens like: xtime [s] xdist [m] speed [km/h] flag [none]
+                const tokens = trimmed.split(/\s+/);
+                headers = [];
+                unitMap = {};
+                for (let ti = 0; ti < tokens.length; ti++) {
+                    const tok = tokens[ti];
+                    if (tok.startsWith('[') && tok.endsWith(']')) {
+                        // Unit token — attach to previous header
+                        if (headers.length > 0) {
+                            const unit = tok.slice(1, -1); // strip [ ]
+                            if (unit && unit !== 'none') {
+                                unitMap[headers[headers.length - 1].toLowerCase()] = unit;
+                            }
+                        }
+                    } else {
+                        headers.push(tok);
+                    }
+                }
                 headerFound = true;
+
+                const lowerHeaders = headers.map(h => h.toLowerCase());
+
+                // Setup Finder
+                findCol = (key: string, defaultCandidates: string[]) => {
+                    // 1. Try Custom Mapping
+                    if (customMapping && customMapping[key]) {
+                        const customName = customMapping[key].toLowerCase();
+                        const idx = lowerHeaders.indexOf(customName);
+                        if (idx !== -1) return idx;
+                    }
+
+                    // 2. Try Default Candidates (Prefix match or exact match?)
+                    // Bosch often uses prefixes like 'nmot' vs 'nmot_w'.
+                    // Let's look for exact match first in lowerHeaders
+                    let idx = lowerHeaders.findIndex(h => defaultCandidates.includes(h));
+
+                    if (idx === -1) {
+                        // Fallback to startsWith for Bosch specific legacy behavior?
+                        // Original code: headers.findIndex(h => h.startsWith(name))
+                        // Let's support both.
+                        idx = lowerHeaders.findIndex(h => defaultCandidates.some(c => h.startsWith(c)));
+                    }
+
+                    if (idx !== -1) {
+                        usedMapping[key] = headers[idx];
+                        return idx;
+                    }
+                    return -1;
+                };
+
+                colMap = {
+                    time: findCol('time', ['time', 't', 'xtime']),
+                    // Bosch specific defaults + common aliases
+                    distance: findCol('distance', ['xdist', 'dist', 'distance']),
+                    velocity: findCol('velocity', ['speed', 'nmot_w_1', 'vehicle_speed', 'velocity', 'v']), // Bosch 'speed' or 'nmot_w' sometimes? No, nmot is rpm.
+                    rpm: findCol('rpm', ['nmot', 'rpm', 'engine_speed', 'revs']),
+                    throttle: findCol('throttle', ['aps', 'throttle', 'pedal', 'accel']),
+                    brake: findCol('brake', ['pbrake', 'brake', 'b_pressure']),
+                    gear: findCol('gear', ['gear', 'ngear']),
+                    steering: findCol('steer', ['steeringangle', 'steer', 'swa']),
+                    // Add Lat/Long support if Bosch has it (rare but possible)
+                    lat: findCol('lat', ['lat', 'latitude', 'poslat']),
+                    long: findCol('long', ['long', 'lng', 'longitude', 'poslong'])
+                };
 
                 // Initialize extra arrays for unmapped headers
                 headers.forEach(h => {
@@ -104,12 +176,11 @@ export function parseBoschExport(content: string): ParsedSession {
         const values = trimmed.split(/\s+/);
         if (values.length < headers.length) continue;
 
-        const getVal = (name: string) => {
-            const idx = headers.findIndex(h => h.startsWith(name));
-            return idx !== -1 ? parseFloat(values[idx]) : 0;
+        const getVal = (colIdx: number) => {
+            return colIdx !== -1 ? parseFloat(values[colIdx]) : 0;
         };
 
-        const laptime = getVal('laptime');
+        const laptime = getVal(colMap.time !== -1 ? colMap.time : 0); // Default to col 0 if time missing? Safe guard.
 
         if (laptime < lastLapTime - 1.0 && lastLapTime > 10) {
             // PERFORMANCE: Use Object spread instead of JSON parse/stringify
@@ -132,13 +203,15 @@ export function parseBoschExport(content: string): ParsedSession {
 
         // Push Standard Data
         currentLapTelemetry.time.push(laptime);
-        currentLapTelemetry.distance.push(getVal('xdist'));
-        currentLapTelemetry.speed.push(getVal('speed'));
-        currentLapTelemetry.rpm.push(getVal('nmot'));
-        currentLapTelemetry.throttle.push(getVal('aps'));
-        currentLapTelemetry.brake.push(getVal('pbrake_f'));
-        currentLapTelemetry.gear.push(getVal('gear'));
-        currentLapTelemetry.steering.push(getVal('SteeringAngle'));
+        currentLapTelemetry.distance.push(getVal(colMap.distance));
+        currentLapTelemetry.speed.push(getVal(colMap.velocity));
+        currentLapTelemetry.rpm.push(getVal(colMap.rpm));
+        currentLapTelemetry.throttle.push(getVal(colMap.throttle));
+        currentLapTelemetry.brake.push(getVal(colMap.brake));
+        currentLapTelemetry.gear.push(getVal(colMap.gear));
+        currentLapTelemetry.steering.push(getVal(colMap.steering));
+        currentLapTelemetry.lat.push(getVal(colMap.lat));
+        currentLapTelemetry.long.push(getVal(colMap.long));
 
         // Push All Raw Data
         headers.forEach((h, idx) => {
@@ -169,10 +242,12 @@ export function parseBoschExport(content: string): ParsedSession {
         console.log('[Parser] GPS data - lat:', firstLap.telemetry.lat?.length, 'long:', firstLap.telemetry.long?.length);
     }
 
-    return { metadata: { ...metadata, columns: headers }, laps };
+    console.log('[Parser] Bosch usedMapping:', JSON.stringify(usedMapping));
+
+    return { metadata: { ...metadata, columns: headers, channelMapping: usedMapping, units: unitMap }, laps };
 }
 
-export function parseVboExport(content: string): ParsedSession {
+export function parseVboExport(content: string, customMapping?: Record<string, string>): ParsedSession {
     const lines = content.split('\n');
     const metadata = { track: 'Unknown (VBOX)', type: 'Log', date: new Date().toISOString() };
 
@@ -222,20 +297,41 @@ export function parseVboExport(content: string): ParsedSession {
     }
 
     const lowerCols = columns.map(c => c.toLowerCase());
-    const findCol = (candidates: string[]) => lowerCols.findIndex(c => candidates.includes(c));
+
+    // Helper to find column index using custom mapping or default candidates
+    const usedMapping: Record<string, string> = { ...customMapping };
+
+    const findCol = (key: string, defaultCandidates: string[]) => {
+        // 1. Try Custom Mapping
+        if (customMapping && customMapping[key]) {
+            const customName = customMapping[key].toLowerCase();
+            const idx = lowerCols.indexOf(customName);
+            if (idx !== -1) return idx;
+            console.warn(`[Parser] Custom mapping for ${key} -> ${customMapping[key]} not found in columns.`);
+        }
+
+        // 2. Try Default Candidates
+        const idx = lowerCols.findIndex(c => defaultCandidates.includes(c));
+        if (idx !== -1) {
+            // Record what we found for UI
+            usedMapping[key] = columns[idx];
+            return idx;
+        }
+        return -1;
+    };
 
     const colMap = {
-        time: findCol(['time', 't']),
-        lat: findCol(['lat', 'latitude', 'poslat']),
-        long: findCol(['long', 'lng', 'longitude', 'poslong']),
-        velocity: findCol(['velocity', 'speed', 'gps_speed', 'v', 'gpsspeed']),
-        rpm: findCol(['rpm', 'engine_speed', 'enginespeed', 'revs', 'nmot', 'engine_rpm', 'enginespd', 'eng_spd', 'enspd', 'ecurpm', 'engine', 'nengine']),
-        throttle: findCol(['throttle', 'throttle_position', 'throttleposition', 'pedal_position', 'pedalposition', 'pps', 'aps', 'accel_pedal', 'accelerator', 'thrpos', 'tp', 'thr', 'pedal', 'acc', 'accel', 'racceleratorpedal']),
-        brake: findCol(['brake', 'brake_position', 'brakeposition', 'brake_pressure', 'brakepressure', 'bpres', 'b_pres', 'b_pressure', 'pbrake_f', 'pbrake', 'brkpos', 'bp', 'brk', 'brakepress']),
-        steer: findCol(['steer', 'steering', 'steer_angle', 'steerangle', 'steering_angle', 'steeringangle', 'swa', 'handwheel_angle', 'wheel_angle', 'sw_angle', 'sa', 'str', 'steer_ang']),
-        lap: findCol(['lap-number', 'lap_number', 'lap']),
-        gear: findCol(['gear', 'current_gear', 'selected_gear', 'gear_no', 'ngear']),
-        avitime: findCol(['avitime', 'avi_time', 'video_time', 'videotime', 'synctime'])
+        time: findCol('time', ['time', 't']),
+        lat: findCol('lat', ['lat', 'latitude', 'poslat', 'gps_lat']),
+        long: findCol('long', ['long', 'lng', 'longitude', 'poslong', 'gps_long']),
+        velocity: findCol('velocity', ['velocity', 'speed', 'gps_speed', 'v', 'gpsspeed', 'vehiclespeed', 'vdl_vehiclespeed', 'wheel_speed', 'wheelspeed']),
+        rpm: findCol('rpm', ['rpm', 'engine_speed', 'enginespeed', 'revs', 'nmot', 'engine_rpm', 'enginespd', 'eng_spd', 'enspd', 'ecurpm', 'engine', 'nengine', 'vdl_enginespeed']),
+        throttle: findCol('throttle', ['throttle', 'throttle_position', 'throttleposition', 'pedal_position', 'pedalposition', 'pps', 'aps', 'accel_pedal', 'accelerator', 'thrpos', 'tp', 'thr', 'pedal', 'acc', 'accel', 'racceleratorpedal', 'gaspedal', 'vdl_gaspedal', 'vdl_accel']),
+        brake: findCol('brake', ['brake', 'brake_position', 'brakeposition', 'brake_pressure', 'brakepressure', 'bpres', 'b_pres', 'b_pressure', 'pbrake_f', 'pbrake', 'brkpos', 'bp', 'brk', 'brakepress', 'vdl_brakepressure', 'vdl_brake']),
+        steer: findCol('steer', ['steer', 'steering', 'steer_angle', 'steerangle', 'steering_angle', 'steeringangle', 'swa', 'handwheel_angle', 'wheel_angle', 'sw_angle', 'sa', 'str', 'steer_ang', 'vdl_steeringangle']),
+        lap: findCol('lap', ['lap-number', 'lap_number', 'lap']),
+        gear: findCol('gear', ['gear', 'current_gear', 'selected_gear', 'gear_no', 'ngear', 'vdl_gear']),
+        avitime: findCol('avitime', ['avitime', 'avi_time', 'video_time', 'videotime', 'synctime'])
     };
 
     // Track used columns to avoid duplication
@@ -522,5 +618,6 @@ export function parseVboExport(content: string): ParsedSession {
         }
     }
 
-    return { metadata: { ...metadata, columns, channelMapping: {} }, laps };
+    console.log('[Parser] Final usedMapping:', JSON.stringify(usedMapping));
+    return { metadata: { ...metadata, columns, channelMapping: usedMapping }, laps };
 }

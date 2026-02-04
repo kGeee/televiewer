@@ -86,10 +86,10 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 
 		if (primaryLap && secondaryLap) {
 			// Build virtual laps from laptime (drop negatives, split on resets)
-			const virtualSecondaryLaps = (() => {
+			// Build virtual laps from laptime (drop negatives, split on resets)
+			const virtualSecondaryLaps: ParsedLap[] | null = (() => {
 				const lt = secondaryLap.telemetry['laptime'] as number[] | undefined;
 				const t = secondaryLap.telemetry.time;
-				const speed = secondaryLap.telemetry.speed;
 				if (!lt || lt.length !== t.length) return null;
 				const segments: { start: number; end: number; duration: number }[] = [];
 				let start = 0;
@@ -103,14 +103,31 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 				}
 				const lastDuration = lt[lt.length - 1] > 0 ? lt[lt.length - 1] : t[t.length - 1] - t[start];
 				segments.push({ start, end: lt.length - 1, duration: lastDuration });
+
+				// Get all channel keys
+				const channels = Object.keys(secondaryLap.telemetry);
+
 				return segments
 					.filter((s) => s.duration > 0)
-					.map((s, idx) => ({
-						lapNumber: idx + 1,
-						time: t.slice(s.start, s.end + 1).map((v) => v - t[s.start]),
-						speed: speed.slice(s.start, s.end + 1),
-						duration: s.duration
-					}));
+					.map((s, idx) => {
+						const newTelemetry: Record<string, number[]> = {};
+						channels.forEach(ch => {
+							if (secondaryLap.telemetry[ch]) {
+								newTelemetry[ch] = secondaryLap.telemetry[ch].slice(s.start, s.end + 1);
+							}
+						});
+						// Re-zero time
+						const startT = t[s.start];
+						newTelemetry.time = newTelemetry.time.map(v => v - startT);
+
+						return {
+							lapNumber: idx + 1,
+							telemetry: newTelemetry,
+							timeSeconds: s.duration,
+							// Ensure strict ParsedLap compliance
+							time: s.duration
+						} as unknown as ParsedLap;
+					});
 			})();
 
 			const derived = !(primaryLap.speed && primaryLap.speed.length > 0);
@@ -128,7 +145,7 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 			) {
 				const virtualDurations = virtualSecondaryLaps.map((v) => ({
 					lapNumber: v.lapNumber,
-					duration: v.duration
+					duration: v.telemetry.time.length > 0 ? v.telemetry.time[v.telemetry.time.length - 1] : 0
 				}));
 				matchResult = matchLapsByDuration(primaryDurations, virtualDurations, 5);
 				const dt = 0.2;
@@ -141,15 +158,17 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 						(_, i) => i * dt
 					);
 					const vBase = Array.from(
-						{ length: Math.max(1, Math.floor((v.time[v.time.length - 1] || 0) / dt)) },
+						{ length: Math.max(1, Math.floor((v.telemetry.time[v.telemetry.time.length - 1] || 0) / dt)) },
 						(_, i) => i * dt
 					);
 					const pRes = resampleData(p.time || [], pSpeed, pBase);
-					const vRes = resampleData(v.time, v.speed, vBase);
-					const lapOffset = findTimeOffset(pRes, vRes, 1 / dt, v.time[v.time.length - 1] || 0, 30);
+					const vRes = resampleData(v.telemetry.time, v.telemetry.speed!, vBase);
+					const lapOffset = findTimeOffset(pRes, vRes, 1 / dt, v.telemetry.time[v.telemetry.time.length - 1] || 0, 30);
 					perLapOffsets.set(m.primaryLapNumber, lapOffset);
 					console.log('[Merge] Per-lap offset (virtual)', m.primaryLapNumber, lapOffset.toFixed(3));
 				}
+				// IMPORTANT: Use the virtual laps as the actual session laps for downstream merge
+				secondarySession.laps = virtualSecondaryLaps;
 			} else {
 				// Build common time base (0.1s) over the overlapping duration window.
 				const overlapDuration = Math.min(
@@ -192,7 +211,7 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 								secondaryDuration: secondaryTime[secondaryTime.length - 1],
 								durationDiff: Math.abs(
 									(p.time && p.time.length > 0 ? p.time[p.time.length - 1] : 0) -
-										secondaryTime[secondaryTime.length - 1]
+									secondaryTime[secondaryTime.length - 1]
 								)
 							})),
 							unmatchedPrimaryIndices: [],
@@ -236,6 +255,9 @@ async function parseAndMatchLaps(sessionId: number, file: File, type: string) {
 	}
 
 	// Discover all channels from secondary (excluding time/distance which are structural)
+	if (secondarySession.laps.length === 0) {
+		throw new Error('No laps found in secondary file');
+	}
 	const allChannels = Object.keys(secondarySession.laps[0].telemetry).filter(
 		(k) => k !== 'time' && k !== 'distance'
 	);
@@ -349,8 +371,14 @@ export const POST: RequestHandler = async ({ request, params }) => {
 		}[] = [];
 
 		for (const match of result.matchResult.matches) {
-			const primaryLap = result.primaryLaps[match.primaryLapIndex];
+			const primaryLap = result.primaryLaps[match.primaryLapIndex]; // Assuming primaryLap is valid as checked earlier
+			// Safety check for secondary lap index
 			const secondaryLap = result.secondarySession.laps[match.secondaryLapIndex];
+			if (!secondaryLap) {
+				console.warn(`[Merge] Invalid secondary lap index ${match.secondaryLapIndex} (total ${result.secondarySession.laps.length}). Skipping match.`);
+				continue;
+			}
+
 			const primaryTime = primaryLap.time || [];
 
 			if (primaryTime.length === 0) continue;

@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { applyAction, enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
+    import { browser } from '$app/environment';
+    import { fly } from 'svelte/transition';
 	import { Upload } from 'tus-js-client'; // Import TUS client
 	import UniversalPlayer from '$lib/components/UniversalPlayer.svelte';
 	import {
@@ -20,12 +22,18 @@
 		X,
 		Copy,
 		Check,
-		UploadCloud
+		UploadCloud,
+        FileText,
+        ArrowRight,
+        AlertCircle,
+        Loader,
+        Flag
 	} from 'lucide-svelte';
 	import Card from '$lib/components/Card.svelte';
 	import TelemetryChart from '$lib/components/TelemetryChart.svelte';
 	import TrackMap from '$lib/components/TrackMap.svelte';
 	import { analyzeLap, calculateDerivedChannels, type CoachingTip } from '$lib/analysis/telemetry';
+	import ParserWorker from '../import/parser.worker?worker';
 
 	let { data } = $props();
 
@@ -33,6 +41,28 @@
 	const session = $derived(data.session);
 	// Mutable state for editing
 	let editingSession = $state({ ...data.session }); // Clone for editing
+	
+    // Remap State
+    let parserWorker: Worker | undefined;
+    let files: File[] = $state([]);
+    let mappingSession: any = $state(null);
+    let remapLoading = $state(false);
+    let showRemapModal = $state(false);
+    let finalizingRemap = false;
+    let mergeLoading = $state(false);
+    let mergePreview: {
+        file: File;
+        type: string;
+        channels: string[];
+        units: Record<string, string>;
+        sampleCounts: Record<string, number>;
+        lapsWithCoverage: number;
+        totalLaps: number;
+        matchedLaps: { primaryLap: number; secondaryLap: number; durationDiff: number }[];
+        unmatchedPrimaryLaps: number[];
+        shift: number;
+    } | null = $state(null);
+    let mergeSelectedChannels: Record<string, boolean> = $state({});
 
 	$effect(() => {
 		// Keep editingSession in sync if data changes (e.g. after save) AND we are not editing
@@ -93,6 +123,226 @@
 			optimizationStatus = session.optimizationStatus;
 		}
 	});
+    
+    // Remap Logic
+    $effect(() => {
+        if (!browser) return;
+        parserWorker = new ParserWorker();
+        parserWorker.onmessage = async (e) => {
+            const { type, fileName, preview, id, blob, error } = e.data;
+            console.log('[Remap] Worker message:', type);
+
+            if (type === 'success') {
+                // If we were finalizing, now proceeding to upload
+                if (finalizingRemap) {
+                     console.log('[Remap] Re-parse complete. Preparing upload...');
+                     const payload = JSON.parse(JSON.stringify({
+                        action: 'prepareUpload',
+                        id: 'remap',
+                        driverId: session.driverId,
+                        trackConfig: session.trackConfig
+                    }));
+                    parserWorker?.postMessage(payload);
+                    return; // Keep loading true
+                }
+
+                // Normal load/preview
+                mappingSession = {
+                    ...preview,
+                    id: id || 'temp',
+                    notes: fileName
+                };
+                remapLoading = false;
+            } else if (type === 'uploadReady') {
+                // Upload to Replace API
+                await replaceSessionData(blob);
+                finalizingRemap = false;
+            } else if (type === 'error') {
+                alert(`Error: ${error}`);
+                remapLoading = false;
+                finalizingRemap = false;
+            }
+        };
+
+        return () => {
+            parserWorker?.terminate();
+        };
+    });
+
+    function handleRemapFileSelect(e: Event) {
+        const target = e.target as HTMLInputElement;
+        if (target.files && target.files.length > 0) {
+            const file = target.files[0];
+            files = [file]; // Store file
+            remapLoading = true;
+            finalizingRemap = false;
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const text = e.target?.result as string;
+                parserWorker?.postMessage({ 
+                    action: 'parse',
+                    id: 'remap',
+                    file: { name: file.name, size: file.size }, 
+                    text,
+                    type: file.name.toLowerCase().endsWith('.vbo') ? 'vbo' : 'bosch',
+                    trackConfig: session.trackConfig // PASS CONFIG
+                });
+            };
+            reader.readAsText(file);
+        }
+    }
+
+    function reparseWithMapping(session: any) {
+        if (!session || !session.metadata.channelMapping || files.length === 0) return;
+        const file = files[0];
+        
+        remapLoading = true;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const text = e.target?.result as string;
+            parserWorker?.postMessage({ 
+                action: 'parse', // Parse again with mapping to update preview/stats
+                id: 'remap',
+                file: { name: file.name, size: file.size }, 
+                text,
+                type: file.name.toLowerCase().endsWith('.vbo') ? 'vbo' : 'bosch',
+                mapping: JSON.parse(JSON.stringify(session.metadata.channelMapping)),
+                trackConfig: session.trackConfig // PASS CONFIG
+            });
+        };
+        reader.readAsText(file);
+    }
+    
+    function applyRemap() {
+        if (!mappingSession) return;
+        remapLoading = true;
+        finalizingRemap = true;
+        // Trigger re-parse with the current mappings
+        reparseWithMapping(mappingSession);
+    }
+
+    async function replaceSessionData(blob: Blob) {
+        try {
+            uploadStatus = 'Replacing data...';
+            // Validate Blob
+			if (!blob || blob.size === 0) throw new Error('Empty data generated');
+
+			const res = await fetch(`/api/sessions/${session.id}/replace`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: blob
+			});
+
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.error || 'Failed to replace data');
+            }
+
+            alert('Session data updated successfully!');
+            showRemapModal = false;
+            await invalidateAll(); // Reload page
+        } catch (e: any) {
+            console.error(e);
+            alert(`Failed to update: ${e.message}`);
+        } finally {
+            remapLoading = false;
+        }
+    }
+
+    async function handleMergeFileSelect(e: Event) {
+        const target = e.target as HTMLInputElement;
+        const file = target.files?.[0];
+        if (!file) return;
+        target.value = '';
+
+        try {
+            mergeLoading = true;
+            const fileType = file.name.toLowerCase().endsWith('.vbo') ? 'vbo' : 'bosch';
+
+            // Step 1: Preview — get available channels and offset
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('type', fileType);
+            formData.append('action', 'preview');
+
+            const res = await fetch(`/api/sessions/${session.id}/merge`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.error || 'Preview failed');
+            }
+
+            const preview = await res.json();
+
+            // Open channel picker — select all by default
+            mergeSelectedChannels = {};
+            for (const ch of preview.channels) {
+                mergeSelectedChannels[ch] = true;
+            }
+            mergePreview = {
+                file,
+                type: fileType,
+                channels: preview.channels,
+                units: preview.units || {},
+                sampleCounts: preview.sampleCounts || {},
+                lapsWithCoverage: preview.lapsWithCoverage,
+                totalLaps: preview.totalLaps,
+                matchedLaps: preview.matchedLaps || [],
+                unmatchedPrimaryLaps: preview.unmatchedPrimaryLaps || [],
+                shift: preview.shift || 0,
+            };
+        } catch (e: any) {
+            console.error(e);
+            alert(`Merge error: ${e.message}`);
+        } finally {
+            mergeLoading = false;
+        }
+    }
+
+    async function executeMerge() {
+        if (!mergePreview) return;
+        const selected = Object.entries(mergeSelectedChannels)
+            .filter(([_, v]) => v)
+            .map(([k]) => k);
+
+        if (selected.length === 0) {
+            alert('Select at least one channel to import.');
+            return;
+        }
+
+        try {
+            mergeLoading = true;
+            const formData = new FormData();
+            formData.append('file', mergePreview.file);
+            formData.append('type', mergePreview.type);
+            formData.append('action', 'merge');
+            formData.append('channels', JSON.stringify(selected));
+
+            const res = await fetch(`/api/sessions/${session.id}/merge`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.error || 'Merge failed');
+            }
+
+            const data = await res.json();
+            mergePreview = null;
+            alert(`Imported ${data.channels.length} channels across ${data.lapsWithCoverage} laps (${data.matchedLaps} matched)`);
+            await invalidateAll();
+        } catch (e: any) {
+            console.error(e);
+            alert(`Merge error: ${e.message}`);
+        } finally {
+            mergeLoading = false;
+        }
+    }
 
 	async function optimizeVideo() {
 		try {
@@ -378,11 +628,14 @@
 		}
 	});
 
+	// Throttle helpers
+	let lastVideoTimeUpdate = 0;
+
 	function onVideoTimeUpdate(vTime: number) {
 		videoTime = vTime;
 		if (!playerComponent || !isVideoPlaying || !displayData || !selectedLap) return;
 
-		// Auto-advance Lap Logic
+		// 1. Auto-advance Lap Logic (Check every frame)
 		if (videoSource === 'session') {
 			const currentLapStartV = getVideoTimeFromLapTime(0, selectedLap.lapNumber) ?? -Infinity;
 			const currentLapEndV =
@@ -407,6 +660,12 @@
 				}
 			}
 		}
+
+		// 2. Throttle Chart Cursor Update (Heavy)
+        // Only update cursor every ~50ms (20fps) to save main thread for video decoding
+		const now = performance.now();
+        if (now - lastVideoTimeUpdate < 50) return;
+        lastVideoTimeUpdate = now;
 
 		// Convert video time back to telemetry time using offset calculation
 		const calculatedHoverTime = getLapTimeFromVideoTime(vTime, selectedLap.lapNumber);
@@ -436,10 +695,18 @@
 	}
 
 	function getBest(laps: any[]) {
-		const valid = laps.filter((l) => l.valid);
-		return valid.length > 0
-			? valid.reduce((prev, curr) => (prev.timeSeconds < curr.timeSeconds ? prev : curr))
-			: null;
+		// Filter for laps that actually have telemetry data
+		const candidates = laps.filter((l) => l.telemetryData && (l.timeSeconds > 20)); // Basic sanity check
+		const valid = candidates.filter((l) => l.valid);
+		
+		if (valid.length > 0) {
+			return valid.reduce((prev, curr) => (prev.timeSeconds < curr.timeSeconds ? prev : curr));
+		}
+		// Fallback: If no valid laps, use the fastest invalid lap (if any)
+		if (candidates.length > 0) {
+			return candidates.reduce((prev, curr) => (prev.timeSeconds < curr.timeSeconds ? prev : curr));
+		}
+		return null;
 	}
 
 	function getAvg(laps: any[]) {
@@ -505,6 +772,11 @@
 		}
 	];
 	let chartConfig = $state((session.telemetryConfig as LayoutConfig) || defaultConfig);
+
+	// View Presets
+	let showSavePresetModal = $state(false);
+	let presetName = $state('');
+	let presetCarId = $state('');
 
 	const selectedLap = $derived(
 		selectedLapNumber !== -1
@@ -810,6 +1082,26 @@
 		</div>
 	</div>
 
+	<!-- Persistent Upload Progress Toast -->
+	{#if isUploading}
+		<div
+            transition:fly={{ y: 50, duration: 300 }}
+			class="fixed bottom-6 right-6 z-50 bg-white dark:bg-slate-900 shadow-2xl rounded-lg p-4 border border-slate-200 dark:border-slate-700 w-80"
+		>
+			<div class="flex items-center justify-between mb-2">
+				<span class="text-sm font-bold text-slate-700 dark:text-slate-200">Uploading Video...</span>
+				<span class="text-xs font-mono text-slate-500">{uploadProgress.toFixed(0)}%</span>
+			</div>
+			<div class="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-2 mb-2 overflow-hidden">
+				<div
+					class="bg-emerald-500 h-full transition-all duration-300"
+					style="width: {uploadProgress}%"
+				></div>
+			</div>
+			<p class="text-xs text-slate-400 truncate">{uploadStatus}</p>
+		</div>
+	{/if}
+
 	<form
 		id="edit-session-form"
 		method="POST"
@@ -861,18 +1153,30 @@
                         />
                     </div>
 
-					<div class="mb-2">
-						<select
+					<div class="mb-2 grid grid-cols-2 gap-2">
+                        <select
 							form="edit-session-form"
 							name="driverId"
 							value={session.driverId}
-							class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-sm text-slate-600 dark:text-slate-300"
+							class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-sm text-slate-600 dark:text-slate-300 w-full"
 						>
-							<option value={null}>-- Select Primary Driver --</option>
+							<option value={null}>-- Select Driver --</option>
 							{#each data.drivers as drv}
 								<option value={drv.id}>{drv.name}</option>
 							{/each}
 						</select>
+
+                        <select
+                            form="edit-session-form"
+                            name="carId"
+                            value={session.carId}
+                            class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-sm text-slate-600 dark:text-slate-300 w-full"
+                        >
+                            <option value={null}>-- Select Car --</option>
+                            {#each data.cars || [] as car}
+                                <option value={car.id}>{car.name}</option>
+                            {/each}
+                        </select>
 					</div>
 
 					<textarea
@@ -1049,12 +1353,27 @@
 					</div>
 				{:else}
 					<h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-2">{session.track}</h1>
-					{#if session.driverName}
-						<div class="flex items-center gap-2 mb-2">
-							<User class="w-4 h-4 text-slate-400 dark:text-slate-500" />
-							<span class="text-sm font-semibold" style="color: {session.driverColor}"
-								>{session.driverName}</span
-							>
+					{#if session.driverName || session.carId}
+						<div class="flex items-center gap-4 mb-2">
+                            {#if session.driverName}
+                                <div class="flex items-center gap-2">
+                                    <User class="w-4 h-4 text-slate-400 dark:text-slate-500" />
+                                    <span class="text-sm font-semibold" style="color: {session.driverColor}"
+                                        >{session.driverName}</span
+                                    >
+                                </div>
+                            {/if}
+                            {#if session.carId && data.cars}
+                                {@const car = data.cars.find(c => c.id === session.carId)}
+                                {#if car}
+                                    <div class="flex items-center gap-2">
+                                        <div class="w-1.5 h-4 rounded-full" style="background-color: {car.color}"></div>
+                                        <span class="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                                            {car.name}
+                                        </span>
+                                    </div>
+                                {/if}
+                            {/if}
 						</div>
 					{/if}
 					{#if session.notes}
@@ -1075,6 +1394,40 @@
 						<Flag class="w-3 h-3" />
 						Configure Track Map
 					</button>
+                    
+                    <button
+                        onclick={() => {
+                            files = [];
+                            mappingSession = null;
+                            showRemapModal = true;
+                        }}
+                        class="text-xs bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 px-3 py-1.5 rounded transition-colors text-slate-700 dark:text-slate-300 font-medium flex items-center gap-2 mt-2 w-fit"
+                    >
+                        <FileText class="w-3 h-3" />
+                        Remap Source Channels
+                    </button>
+
+                    <div class="relative">
+                        <input
+                            type="file"
+                            accept=".vbo,.txt,.log"
+                            class="hidden"
+                            id="merge-file-input"
+                            onchange={handleMergeFileSelect}
+                        />
+                        <button
+                            onclick={() => document.getElementById('merge-file-input')?.click()}
+                            disabled={mergeLoading}
+                            class="text-xs bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 px-3 py-1.5 rounded transition-colors text-slate-700 dark:text-slate-300 font-medium flex items-center gap-2 mt-2 w-fit"
+                        >
+                            {#if mergeLoading}
+                                <span class="animate-spin">⏳</span> Analyzing...
+                            {:else}
+                                <Activity class="w-3 h-3" />
+                                Add Secondary Telemetry
+                            {/if}
+                        </button>
+                    </div>
 				{/if}
 			</div>
 			<div
@@ -1289,7 +1642,29 @@
 							<h3 class="text-sm font-semibold text-slate-600 dark:text-slate-300">
 								Channel Configuration
 							</h3>
-							<div class="flex gap-2">
+							<div class="flex items-center gap-2">
+								{#if data.viewPresets.length > 0}
+									<select
+										class="text-xs bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-1.5 py-0.5 text-slate-600 dark:text-slate-300 outline-none"
+										onchange={(e) => {
+											const preset = data.viewPresets.find(p => p.id === parseInt(e.currentTarget.value));
+											if (preset?.config) {
+												chartConfig = preset.config as LayoutConfig;
+											}
+											e.currentTarget.value = '';
+										}}
+									>
+										<option value="">Load Preset...</option>
+										{#each data.viewPresets as preset}
+											<option value={preset.id}>{preset.name}{preset.carId ? ` (car)` : ''}</option>
+										{/each}
+									</select>
+								{/if}
+								<button
+									type="button"
+									class="text-xs text-blue-500 hover:text-blue-400"
+									onclick={() => { showSavePresetModal = true; presetName = ''; presetCarId = ''; }}>Save Preset</button
+								>
 								<button
 									type="button"
 									class="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
@@ -1412,6 +1787,87 @@
 									];
 								}}>+ Add Lane</button
 							>
+						</div>
+					</div>
+				{/if}
+
+				{#if showSavePresetModal}
+					<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+					<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onclick={(e) => { if (e.target === e.currentTarget) showSavePresetModal = false; }}>
+						<div class="bg-white dark:bg-slate-900 rounded-lg p-6 w-96 border border-slate-200 dark:border-slate-800 shadow-xl max-h-[80vh] overflow-y-auto">
+							<h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-4">Save View Preset</h3>
+							{#if data.viewPresets.length > 0}
+								<div class="mb-4">
+									<p class="text-xs text-slate-500 dark:text-slate-400 mb-2">Existing presets:</p>
+									<div class="space-y-1">
+										{#each data.viewPresets as preset}
+											<div class="flex items-center justify-between text-xs bg-slate-50 dark:bg-slate-950 px-2 py-1 rounded border border-slate-200 dark:border-slate-800">
+												<span class="text-slate-600 dark:text-slate-300">{preset.name}{preset.carId ? ' (car)' : ''}</span>
+												<form method="POST" action="?/deletePreset" use:enhance={() => {
+													return async ({ result }) => {
+														await invalidateAll();
+														await applyAction(result);
+													};
+												}}>
+													<input type="hidden" name="presetId" value={preset.id} />
+													<button type="submit" class="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
+												</form>
+											</div>
+										{/each}
+									</div>
+								</div>
+							{/if}
+							<form method="POST" action="?/savePreset" use:enhance={() => {
+								return async ({ result }) => {
+									if (result.type === 'success') {
+										showSavePresetModal = false;
+										await invalidateAll();
+									}
+									await applyAction(result);
+								};
+							}}>
+								<input type="hidden" name="config" value={JSON.stringify(chartConfig)} />
+								<div class="space-y-3">
+									<div>
+										<label for="presetName" class="block text-xs text-slate-500 dark:text-slate-400 mb-1">Preset Name</label>
+										<input
+											id="presetName"
+											type="text"
+											name="name"
+											bind:value={presetName}
+											required
+											class="w-full text-sm bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-3 py-1.5 text-slate-700 dark:text-slate-200 outline-none focus:border-orange-500"
+											placeholder="e.g. Braking Analysis"
+										/>
+									</div>
+									<div>
+										<label for="presetCarId" class="block text-xs text-slate-500 dark:text-slate-400 mb-1">Car (optional — leave blank for global)</label>
+										<select
+											id="presetCarId"
+											name="carId"
+											bind:value={presetCarId}
+											class="w-full text-sm bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-3 py-1.5 text-slate-700 dark:text-slate-200 outline-none"
+										>
+											<option value="">Global (all cars)</option>
+											{#each data.cars as car}
+												<option value={car.id}>{car.name}</option>
+											{/each}
+										</select>
+									</div>
+									<div class="flex justify-end gap-2 pt-2">
+										<button
+											type="button"
+											class="text-xs px-3 py-1.5 rounded border border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800"
+											onclick={() => (showSavePresetModal = false)}>Cancel</button
+										>
+										<button
+											type="submit"
+											class="text-xs px-3 py-1.5 rounded bg-orange-500 text-white hover:bg-orange-600"
+											disabled={!presetName.trim()}>Save</button
+										>
+									</div>
+								</div>
+							</form>
 						</div>
 					</div>
 				{/if}
@@ -2140,4 +2596,255 @@
 			</div>
 		</div>
 	{/if}
+
+    <!-- REMAP MODALS -->
+    {#if showRemapModal}
+        <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+             <!-- svelte-ignore a11y_click_events_have_key_events -->
+             <!-- svelte-ignore a11y_no_static_element_interactions -->
+             <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" onclick={() => showRemapModal = false}></div>
+             <!-- svelte-ignore a11y_click_events_have_key_events -->
+             <!-- svelte-ignore a11y_no_static_element_interactions -->
+             <div class="relative w-full max-w-lg bg-slate-900 rounded-xl shadow-2xl border border-slate-800 p-6" onclick={e => e.stopPropagation()}>
+                <header class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-bold text-white">Remap Telemetry Channels</h3>
+                    <button onclick={() => showRemapModal = false} class="text-slate-400 hover:text-white"><X class="w-6 h-6"/></button>
+                </header>
+                
+                {#if !mappingSession}
+                    <div class="space-y-4">
+                         
+                         {#if files.length > 0 && remapLoading}
+                             <div class="text-center py-8 border-2 border-dashed border-slate-800 rounded-lg">
+                                <Loader class="w-10 h-10 text-orange-500 animate-spin mx-auto mb-4"/>
+                                <p class="text-sm text-slate-300">Parsing file...</p>
+                                <p class="text-xs text-slate-500 mt-1">This may take a few seconds.</p>
+                             </div>
+                         {:else}
+                             <p class="text-sm text-slate-400 mb-2">
+                                Updates to channel mappings require the original raw file. Please re-upload it to proceed.
+                             </p>
+                             <!-- svelte-ignore a11y_click_events_have_key_events -->
+                             <!-- svelte-ignore a11y_no_static_element_interactions -->
+                             <div 
+                                class="border-2 border-dashed border-slate-700 rounded-lg p-8 text-center hover:border-orange-500 transition-colors relative cursor-pointer bg-slate-950/50"
+                                onclick={() => document.getElementById('remap-file-input')?.click()}
+                            >
+                                <input id="remap-file-input" type="file" class="hidden" onchange={handleRemapFileSelect} accept=".vbo,.csv,.txt" />
+                                <UploadCloud class="w-10 h-10 text-slate-500 mx-auto mb-3" />
+                                <p class="text-sm text-slate-300 font-medium">Click to upload original file</p>
+                                <p class="text-xs text-slate-500 mt-1">Supported: .vbo, .csv, .txt</p>
+                             </div>
+                         {/if}
+                    </div>
+                {/if}
+
+                {#if mappingSession}
+                     <div class="mt-2 flex flex-col h-full max-h-[65vh]">
+                        <div class="flex items-center justify-between mb-4 bg-slate-950 p-2 rounded border border-slate-800">
+                             <div class="flex flex-col">
+                                 <span class="text-xs text-slate-500 uppercase">Load Preset</span>
+                                 <select 
+                                    class="bg-transparent text-sm text-white outline-none"
+                                    onchange={(e) => {
+                                        const mappingId = parseInt(e.currentTarget.value);
+                                        const mapping = data.channelMappings.find(m => m.id === mappingId);
+                                        if (mapping && mappingSession.metadata) {
+                                            // Merge or Replace? Let's replace for the keys that exist
+                                            if (!mappingSession.metadata.channelMapping) mappingSession.metadata.channelMapping = {};
+                                            Object.assign(mappingSession.metadata.channelMapping, mapping.mapping);
+                                        }
+                                    }}
+                                 >
+                                    <option value="">-- Select Saved Mapping --</option>
+                                    {#each data.channelMappings.filter(m => m.carId === session.carId) as map}
+                                        <option value={map.id}>{map.name}</option>
+                                    {/each}
+                                 </select>
+                             </div>
+                             
+                             <div class="h-8 w-px bg-slate-800 mx-2"></div>
+                             
+                             <form 
+                                action="?/saveChannelMapping" 
+                                method="POST" 
+                                use:enhance={() => {
+                                    return async ({ result }) => {
+                                        if (result.type === 'success') {
+                                            alert('Mapping saved!');
+                                            await invalidateAll(); // Reload to get new list
+                                        } else {
+                                            alert('Failed to save mapping. Check console.');
+                                        }
+                                    }
+                                }}
+                                class="flex items-center gap-2"
+                             >
+                                <input type="hidden" name="carId" value={session.carId || ''} />
+                                <input type="hidden" name="mapping" value={JSON.stringify(mappingSession.metadata.channelMapping)} />
+                                
+                                <div class="relative group">
+                                    <input 
+                                        type="text" 
+                                        name="name" 
+                                        placeholder={session.carId ? "Preset Name..." : "No Car Selected"} 
+                                        class="bg-slate-800 text-xs text-white px-2 py-1 rounded border border-slate-700 w-32 disabled:opacity-50 disabled:cursor-not-allowed" 
+                                        required
+                                        disabled={!session.carId}
+                                    />
+                                    <button 
+                                        type="submit" 
+                                        class="text-xs bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-1 rounded disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-600"
+                                        disabled={!session.carId}
+                                    >
+                                        Save
+                                    </button>
+                                    
+                                    {#if !session.carId}
+                                        <div class="absolute bottom-full left-0 mb-2 w-48 p-2 bg-slate-800 text-xs text-slate-300 rounded shadow-lg hidden group-hover:block z-50 border border-slate-700">
+                                            Please set a Car for this session in the "Edit Session" menu to save channel mappings.
+                                        </div>
+                                    {/if}
+                                </div>
+                             </form>
+                        </div>
+
+                        <p class="text-xs text-slate-400 mb-4 bg-slate-950 p-3 rounded border border-slate-800">
+                            <strong>Instructions:</strong> Match the columns found in your file (Right) to the standard channels (Left). 
+                            Required channels (Velocity, Lat/Long) must be mapped for analysis.
+                        </p>
+                        
+                        <div class="overflow-y-auto flex-1 pr-2 space-y-3">
+                            {#if mappingSession.metadata.columns}
+                                {#each ['velocity', 'rpm', 'throttle', 'brake', 'steer', 'gear', 'lat', 'long'] as channel}
+                                    <div class="flex items-center justify-between p-3 bg-slate-950 rounded border border-slate-800">
+                                        <div class="flex items-center gap-3">
+                                             <span class="text-sm font-bold text-slate-300 capitalize w-16">{channel}</span>
+                                             {#if mappingSession.metadata.channelMapping?.[channel]}
+                                                 <Check class="w-4 h-4 text-emerald-500" />
+                                             {:else}
+                                                 <AlertCircle class="w-4 h-4 text-orange-500" />
+                                             {/if}
+                                        </div>
+                                        
+                                        <select
+                                            value={mappingSession.metadata.channelMapping?.[channel] || ''}
+                                            onchange={(e) => {
+                                                const val = e.currentTarget.value;
+                                                if (!mappingSession.metadata.channelMapping) mappingSession.metadata.channelMapping = {};
+                                                mappingSession.metadata.channelMapping[channel] = val;
+                                            }}
+                                            class="bg-slate-800 border-slate-700 text-white text-xs rounded px-2 py-1.5 w-40 md:w-56 focus:border-orange-500 focus:ring-1 focus:ring-orange-500 outline-none"
+                                        >
+                                            <option value="">-- Let Auto-Detect --</option>
+                                            {#each mappingSession.metadata.columns as col}
+                                                <option value={col}>{col}</option>
+                                            {/each}
+                                        </select>
+                                    </div>
+                                {/each}
+                            {:else}
+                                <div class="text-center p-8 text-slate-500">
+                                    No column information available.
+                                </div>
+                            {/if}
+                        </div>
+
+                        <div class="mt-4 flex justify-end gap-3 pt-4 border-t border-slate-800">
+                             <!-- Reparse button to preview validity? Or just one step -->
+                             <!-- Keep it simple for now -->
+                            <button
+                                onclick={applyRemap}
+                                class="px-6 py-2 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded flex items-center gap-2 shadow-lg shadow-orange-900/20"
+                                disabled={remapLoading}
+                            >
+                                {#if remapLoading}
+                                    <Loader class="w-4 h-4 animate-spin"/> Processing...
+                                {:else}
+                                    Apply & Update Session
+                                {/if}
+                            </button>
+                        </div>
+                     </div>
+                {/if}
+            </div>
+        </div>
+    {/if}
+
+    {#if mergePreview}
+        <!-- Channel Picker Modal -->
+        <div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick={() => mergePreview = null}>
+            <div class="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-2xl max-w-lg w-full max-h-[80vh] flex flex-col" onclick={(e) => e.stopPropagation()}>
+                <div class="p-5 border-b border-slate-200 dark:border-slate-700">
+                    <h3 class="text-lg font-semibold text-slate-900 dark:text-white">Select Channels to Import</h3>
+                    <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                        {mergePreview.file.name} &middot; Matched {mergePreview.lapsWithCoverage}/{mergePreview.totalLaps} laps{mergePreview.shift !== 0 ? ` (shift: ${mergePreview.shift >= 0 ? '+' : ''}${mergePreview.shift})` : ''}
+                    </p>
+                </div>
+
+                <div class="p-4 overflow-y-auto flex-1">
+                    <div class="flex gap-2 mb-3">
+                        <button
+                            class="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300"
+                            onclick={() => {
+                                const all: Record<string, boolean> = {};
+                                for (const ch of mergePreview!.channels) all[ch] = true;
+                                mergeSelectedChannels = all;
+                            }}
+                        >Select All</button>
+                        <button
+                            class="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300"
+                            onclick={() => {
+                                const none: Record<string, boolean> = {};
+                                for (const ch of mergePreview!.channels) none[ch] = false;
+                                mergeSelectedChannels = none;
+                            }}
+                        >Select None</button>
+                    </div>
+
+                    <div class="grid gap-1">
+                        {#each mergePreview.channels as channel}
+                            <label class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    bind:checked={mergeSelectedChannels[channel]}
+                                    class="rounded border-slate-300 dark:border-slate-600"
+                                />
+                                <span class="font-mono text-sm text-slate-800 dark:text-slate-200 flex-1">{channel}</span>
+                                <span class="text-xs text-slate-400 dark:text-slate-500 min-w-[4rem] text-right">
+                                    {mergePreview.units[channel] || '—'}
+                                </span>
+                                <span class="text-xs text-slate-400 dark:text-slate-500 tabular-nums min-w-[5rem] text-right">
+                                    {(mergePreview.sampleCounts[channel] || 0).toLocaleString()} pts
+                                </span>
+                            </label>
+                        {/each}
+                    </div>
+                </div>
+
+                <div class="p-4 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                    <span class="text-xs text-slate-500">
+                        {Object.values(mergeSelectedChannels).filter(Boolean).length} of {mergePreview.channels.length} channels selected
+                    </span>
+                    <div class="flex gap-2">
+                        <button
+                            class="px-4 py-2 text-sm rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300"
+                            onclick={() => mergePreview = null}
+                        >Cancel</button>
+                        <button
+                            class="px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50"
+                            disabled={mergeLoading || Object.values(mergeSelectedChannels).filter(Boolean).length === 0}
+                            onclick={executeMerge}
+                        >
+                            {#if mergeLoading}
+                                Importing...
+                            {:else}
+                                Import Channels
+                            {/if}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {/if}
 </div>

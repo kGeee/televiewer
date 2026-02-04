@@ -64,8 +64,8 @@
 
 	// Effect to update chart when data or config changes
 	$effect(() => {
-		// Explicitly declare dependencies (cursorTime triggers redraw for cursor line)
-		const _deps = [data, config, analysisEvents, $theme, cursorTime];
+		// Explicitly declare dependencies (cursorTime triggers redraw for cursor line via separate effect)
+		const _deps = [data, config, analysisEvents, $theme];
 		const colors = getColors($theme === 'dark');
 
 		if (!container || !data || !Chart || !config.length) return;
@@ -493,6 +493,20 @@
 			chart.data.datasets = datasets;
 			chart.options.scales = scales;
 			chart.update('none'); // Update without animation
+		}
+	});
+
+	// Separate effect for lightweight cursor updates
+	$effect(() => {
+		// Only cursorTime dependency
+		const _c = cursorTime;
+		if (chart && chart.ctx) {
+			// Just trigger a render, the plugin reads the new cursorTime prop directly
+			// chart.draw() or chart.render() might not be exposed on the instance type easily in TS,
+			// but chart.update('none') is still heavier than needed if we just want to redraw canvas.
+			// Actually update('none') is reasonably fast if data didn't change...
+			// But since we separated the effects, this runs efficiently.
+			chart.draw();
 		}
 	});
 </script>

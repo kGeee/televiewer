@@ -6,7 +6,7 @@ import { splitTelemetryIntoLaps, extractLapTelemetry } from '$lib/analysis/geo';
 const sessionCache = new Map<string, any>();
 
 self.onmessage = async (e: MessageEvent) => {
-    const { action, id, file, text, type, config } = e.data;
+    const { action, id, file, text, type, config, mapping } = e.data;
 
     try {
         if (action === 'parse' || !action) { // Default to parse if no action for backward compat
@@ -16,14 +16,63 @@ self.onmessage = async (e: MessageEvent) => {
 
             let result;
             if (file.name.toLowerCase().endsWith('.vbo')) {
-                result = parseVboExport(text);
+                result = parseVboExport(text, mapping);
             } else {
-                result = parseBoschExport(text);
+                result = parseBoschExport(text, mapping);
             }
 
             const { metadata, laps } = result;
             const parseTime = performance.now() - startTime;
             console.log(`[Worker] Parse complete in ${parseTime.toFixed(0)}ms. Found ${laps.length} laps.`);
+
+            // NEW: If trackConfig is provided (e.g. during remap), recalculate laps immediately
+            const trackConfig = e.data.trackConfig || config; // Support both keys if inconsistent
+            if (trackConfig && trackConfig.finishLine) {
+                console.log('[Worker] Track config provided. Recalculating laps based on custom finish line...');
+
+                // 1. Reconstruct Full Telemetry (Continuous) - reuse logic from 'recalculate'
+                // TODO: Refactor this into a helper function to avoid duplication with 'recalculate' block
+                const fullTelemetry: any = { time: [] as number[] };
+                if (laps.length > 0) {
+                    const firstLapTelemetry = laps[0].telemetry;
+                    const keys = Object.keys(firstLapTelemetry);
+                    keys.forEach(k => fullTelemetry[k] = []);
+
+                    let timeOffset = 0;
+                    for (const lap of laps) {
+                        const lapTime = lap.telemetry.time;
+                        if (!lapTime || lapTime.length === 0) continue;
+
+                        for (let i = 0; i < lapTime.length; i++) fullTelemetry.time.push(lapTime[i] + timeOffset);
+                        for (const k of keys) {
+                            if (k === 'time') continue;
+                            if (lap.telemetry[k]) fullTelemetry[k].push(...lap.telemetry[k]);
+                        }
+                        timeOffset += lapTime[lapTime.length - 1];
+                    }
+
+                    // 2. Fix Inverted Longitude (heuristic)
+                    const sampleLng = fullTelemetry.long[Math.floor(fullTelemetry.long.length / 2)];
+                    const targetLng = trackConfig.finishLine.lng;
+                    if (targetLng < 0 && sampleLng > 0 && Math.abs(targetLng - sampleLng) > 100) {
+                        fullTelemetry.long = fullTelemetry.long.map((l: number) => -Math.abs(l));
+                    }
+
+                    // 3. Split
+                    const detectedLaps = splitTelemetryIntoLaps(fullTelemetry, trackConfig);
+
+                    // 4. Replace Laps
+                    const newParsedLaps = detectedLaps.map(d => ({
+                        lapNumber: d.lapNumber,
+                        time: d.timeSeconds,
+                        telemetry: extractLapTelemetry(fullTelemetry, d.startIdx, d.endIdx)
+                    }));
+
+                    // Update result.laps
+                    result.laps = newParsedLaps;
+                    console.log(`[Worker] Recalculation complete. New lap count: ${result.laps.length}`);
+                }
+            }
 
             // Cache the result using the provided ID or generic one
             if (id) {

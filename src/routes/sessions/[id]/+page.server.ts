@@ -1,6 +1,6 @@
 import { db } from '$lib/server/db/client';
-import { sessions, laps, lap_telemetry, drivers } from '$lib/server/db/schema';
-import { eq, asc, and, getTableColumns } from 'drizzle-orm';
+import { sessions, laps, lap_telemetry, drivers, cars, car_channel_mappings, telemetry_channels, telemetry_view_presets } from '$lib/server/db/schema';
+import { eq, asc, and, inArray, getTableColumns } from 'drizzle-orm';
 import { error, fail, type Actions } from '@sveltejs/kit';
 
 import type { PageServerLoad } from './$types';
@@ -28,6 +28,8 @@ export const load: PageServerLoad = async ({ params }) => {
     const sessionData = session[0];
 
     const allDrivers = await db.select().from(drivers);
+    const allCars = await db.select().from(cars).orderBy(asc(cars.name));
+    const allMappings = await db.select().from(car_channel_mappings); // Should be small enough to just load all
 
     const sessionLaps = await db.select({
         ...getTableColumns(laps),
@@ -42,10 +44,19 @@ export const load: PageServerLoad = async ({ params }) => {
     // Fetch new columnar telemetry
     const telemetryData = await db.select().from(lap_telemetry).where(eq(lap_telemetry.sessionId, sessionId));
 
+    // Fetch auxiliary channels from telemetry_channels
+    const lapIds = sessionLaps.map(l => l.id);
+    const auxChannels = lapIds.length > 0
+        ? await db.select().from(telemetry_channels).where(inArray(telemetry_channels.lapId, lapIds))
+        : [];
+
+    // Fetch view presets
+    const viewPresets = await db.select().from(telemetry_view_presets).orderBy(asc(telemetry_view_presets.name));
+
     // Map telemetry to laps
     const lapsWithTelemetry = sessionLaps.map(l => {
         const t = telemetryData.find(t => t.lapNumber === l.lapNumber);
-        let cleanData = null;
+        let cleanData: Record<string, number[]> | null = null;
 
         if (t) {
             cleanData = {
@@ -59,10 +70,15 @@ export const load: PageServerLoad = async ({ params }) => {
                 brake: t.brake || [],
                 gear: t.gear || [],
                 steering: t.steering || []
-                // NOTE: 'other' channels are now in `telemetry_channels` table and loaded on demand 
-                // or if needed for basic view, we'd fetch them separately.
-                // For now, viewer expects core channels.
             };
+
+            // Merge auxiliary channels (e.g. Bosch engine temp, oil pressure)
+            const lapAux = auxChannels.filter(ch => ch.lapId === l.id);
+            for (const ch of lapAux) {
+                if (ch.data?.length && !cleanData[ch.name]) {
+                    cleanData[ch.name] = ch.data;
+                }
+            }
         }
 
         return {
@@ -74,7 +90,10 @@ export const load: PageServerLoad = async ({ params }) => {
     return {
         session: sessionData,
         laps: lapsWithTelemetry,
-        drivers: allDrivers
+        drivers: allDrivers,
+        cars: allCars,
+        channelMappings: allMappings,
+        viewPresets
     };
 };
 
@@ -103,6 +122,7 @@ export const actions: Actions = {
         updateData.tirePressureRL = getNum('tirePressureRL', true);
         updateData.tirePressureRR = getNum('tirePressureRR', true);
         updateData.driverId = getNum('driverId');
+        updateData.carId = getNum('carId');
 
         updateData.condition = data.get('condition') as string;
         updateData.tireCompound = data.get('tireCompound') as string;
@@ -121,12 +141,6 @@ export const actions: Actions = {
 
         const date = data.get('date');
         if (date !== null && date !== '') {
-            // Ensure we keep the ISO format if previously it was full ISO
-            // Or just store the date string if that's how we roll. 
-            // The DB expects text. The input type="date" returns YYYY-MM-DD.
-            // If the original date had time, we might lose it if we just overwrite.
-            // Ideally we preserve the time, but for now let's just update the day.
-            // Actually, let's just save what we get.
             updateData.date = new Date(date as string).toISOString();
         }
 
@@ -209,6 +223,67 @@ export const actions: Actions = {
         } catch (err) {
             console.error(err);
             return fail(500, { error: 'Failed to update track config' });
+        }
+    },
+    savePreset: async ({ request }) => {
+        const data = await request.formData();
+        const name = data.get('name') as string;
+        const configStr = data.get('config') as string;
+        const carIdStr = data.get('carId') as string;
+
+        if (!name || !configStr) {
+            return fail(400, { error: 'Name and config are required' });
+        }
+
+        try {
+            const carId = carIdStr ? parseInt(carIdStr) : null;
+            await db.insert(telemetry_view_presets).values({
+                name,
+                carId: isNaN(carId as number) ? null : carId,
+                config: JSON.parse(configStr)
+            });
+            return { type: 'success' };
+        } catch (err) {
+            console.error(err);
+            return fail(500, { error: 'Failed to save preset' });
+        }
+    },
+    deletePreset: async ({ request }) => {
+        const data = await request.formData();
+        const presetId = parseInt(data.get('presetId') as string);
+
+        if (isNaN(presetId)) {
+            return fail(400, { error: 'Invalid preset ID' });
+        }
+
+        try {
+            await db.delete(telemetry_view_presets).where(eq(telemetry_view_presets.id, presetId));
+            return { type: 'success' };
+        } catch (err) {
+            console.error(err);
+            return fail(500, { error: 'Failed to delete preset' });
+        }
+    },
+    saveChannelMapping: async ({ request }) => {
+        const data = await request.formData();
+        const carId = parseInt(data.get('carId') as string);
+        const name = data.get('name') as string;
+        const mappingStr = data.get('mapping') as string;
+
+        if (!carId || !name || !mappingStr) {
+            return fail(400, { error: 'Missing required fields' });
+        }
+
+        try {
+            await db.insert(car_channel_mappings).values({
+                carId,
+                name,
+                mapping: JSON.parse(mappingStr)
+            });
+            return { type: 'success' };
+        } catch (err: any) {
+            console.error(err);
+            return fail(500, { error: 'Failed to save mapping' });
         }
     }
 };

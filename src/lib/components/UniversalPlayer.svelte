@@ -30,6 +30,8 @@
     // Multi-part state
     type Partition = {
         url: string;
+        originalUrl?: string;
+        isTranscoding?: boolean;
         duration: number; // seconds
         globalStart: number;
         globalEnd: number;
@@ -76,6 +78,8 @@
 				const isHls = u.includes('.m3u8') || u.includes('bunnycdn'); // Rough check
                 return {
                     url: u,
+                    originalUrl: u,
+                    isTranscoding: false,
                     duration: 0,
                     globalStart: 0, 
                     globalEnd: 0,
@@ -92,6 +96,13 @@
     async function loadMetadataSequentially() {
         if (partitions.length === 0) return;
         
+        // OPTIMIZATION: If single native file (especially Blobs), skip probing to avoid double-load issues
+        if (partitions.length === 1 && partitions[0].type === 'native') {
+            console.log('[Player] Single native file. Skipping pre-probe.');
+            loadPartition(0);
+            return;
+        }
+        
         // Create a SINGLE video element for probing
         const probeVideo = document.createElement('video');
         probeVideo.preload = 'metadata';
@@ -103,12 +114,6 @@
             if (part.type === 'native' || part.type === 'hls') {
                 try {
 					if (part.type === 'hls') {
-						// For HLS, we can't easily probe with a temp video element without initializing HLS.
-						// We might trust the manifest or just use a default?
-						// For now, let's try to probe if it works, or fallback.
-						// Actually, HLS streams usually have explicit length in manifest, but let's see.
-						// If Bunny, we might need to fetch metadata separately? 
-						// Fallback: 0 duration and rely on player updates?
 						partitions[i].duration = 0; // Dynamic loading
 					} else {
 	                    const duration = await getDurationForUrl(probeVideo, part.url);
@@ -179,6 +184,8 @@
         });
     }
     
+    // let loadTimeout: any; // Removed optimizations
+
     function loadPartition(index: number, startTimeInPart: number = 0) {
         if (index < 0 || index >= partitions.length) return;
         currentPartitionIndex = index;
@@ -196,19 +203,20 @@
 				ytPlayer = null;
 			}
 			
-            setTimeout(() => {
-                if (nativeVideo) {
-					if (part.type === 'hls') {
-						initHls(part.url, startTimeInPart);
-					} else {
-						if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
-	                    nativeVideo.src = part.url;
-	                    nativeVideo.currentTime = startTimeInPart;
-					}
+            if (nativeVideo) {
+                if (part.type === 'hls') {
+                    initHls(part.url, startTimeInPart);
+                } else {
+                    if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+                    
+                    // Robust loading for native/blob
+                    nativeVideo.src = part.url;
+                    nativeVideo.currentTime = startTimeInPart;
                 }
-            }, 0);
+            }
         }
     }
+
 
 	function initHls(url: string, startTime: number) {
 		if (hlsInstance) {
@@ -449,6 +457,18 @@
 			onplay={onPlay}
 			onpause={onPause}
 			onended={handlePartitionEnd}
+			onloadedmetadata={(e) => {
+				// Update duration if unknown
+				if (nativeVideo && partitions[currentPartitionIndex]) {
+					const dur = nativeVideo.duration;
+					if (dur && dur !== Infinity) {
+						partitions[currentPartitionIndex].duration = dur;
+						partitions[currentPartitionIndex].globalEnd = partitions[currentPartitionIndex].globalStart + dur;
+						// If single part, update total
+						if(partitions.length === 1) totalDuration = dur;
+					}
+				}
+			}}
 			ontimeupdate={(e) => {
 				const timeInPart = nativeVideo?.currentTime || 0;
                 const part = partitions[currentPartitionIndex];
@@ -457,20 +477,81 @@
     				if (onTimeUpdate) onTimeUpdate(currentTime);
                 }
 			}}
+            onerror={(e) => {
+                if (nativeVideo) {
+                    const err = nativeVideo.error;
+                    // Error Code 4 = MEDIA_ERR_SRC_NOT_SUPPORTED
+                    // Error Code 3 = MEDIA_ERR_DECODE
+                    
+                    if ((err?.code === 4 || err?.code === 3) && partitions[currentPartitionIndex]) {
+                        const part = partitions[currentPartitionIndex];
+                        
+                        // Check if we can fallback to transcoding
+                        if (!part.isTranscoding && !part.url.startsWith('blob:') && !part.url.startsWith('http')) {
+                            console.log('[Player] Attempting fallback transcode for:', part.url);
+                            
+                            // Mark as transcoding to prevent loops
+                            part.isTranscoding = true;
+                            // Update URL to stream endpoint
+                            part.url = `/api/video/stream?path=${encodeURIComponent(part.originalUrl || part.url)}`;
+                            
+                            // Force reactivity update if needed
+                            partitions = [...partitions];
+                            
+                            // Reload this partition
+                             setTimeout(() => {
+                                 loadPartition(currentPartitionIndex, currentTime - part.globalStart);
+                             }, 0);
+                             return;
+                        }
+                    }
+
+                    console.error('[Video Error]', err);
+                    if (partitions[currentPartitionIndex]) {
+                        partitions[currentPartitionIndex].hasError = true;
+                        partitions = [...partitions]; 
+                    }
+                    
+                    let msg = 'Unknown Error';
+                    if (err?.code === 3) msg = 'Decoding Error (Corrupt frame or unsupported codec?)';
+                    if (err?.code === 4) msg = 'Source Not Supported (Codec not supported by browser?)';
+                    
+                    if (err?.code && err.code !== 20) {
+                         console.warn('Video playback failed:', msg);
+                    }
+                }
+            }}
 		></video>
 	{:else}
 		<div class="yt-slot w-full h-full"></div>
 	{/if}
 
 	<!-- Error Overlay -->
+	<!-- Error/Status Overlay -->
     {#if partitions[currentPartitionIndex]?.hasError}
         <div class="absolute inset-0 flex items-center justify-center bg-black/80 z-40 text-center p-4">
             <div class="text-white space-y-2">
-                <p class="text-red-500 font-bold uppercase tracking-wider text-sm">Video Not Found</p>
-                <p class="text-xs text-slate-400 break-all">{partitions[currentPartitionIndex].url}</p>
-                <p class="text-[10px] text-slate-500 mt-2">Check console for details.</p>
+                <p class="text-red-500 font-bold uppercase tracking-wider text-sm">Video Error</p>
+                <p class="text-xs text-slate-400 break-all">{partitions[currentPartitionIndex].originalUrl || partitions[currentPartitionIndex].url}</p>
+                <div class="text-[10px] text-slate-500 mt-2">
+                    {#if partitions[currentPartitionIndex].url.startsWith('blob:')}
+                        Browser cannot play this file directly.<br>
+                        HEVC (H.265) requires upload for conversion or Safari.<br>
+                        Please use Safari or convert to H.264.
+                    {:else}
+                         Format may not be supported by this browser.<br>
+                        Try Safari or convert to H.264.
+                    {/if}
+                </div>
             </div>
         </div>
+    {:else if partitions[currentPartitionIndex]?.isTranscoding && nativeVideo?.readyState < 3}
+         <div class="absolute inset-0 flex items-center justify-center bg-black/60 z-40 text-center p-4">
+             <div class="flex flex-col items-center gap-2">
+                 <div class="w-6 h-6 border-2 border-orange-500 border-t-transparent rounded-full animate-spin"></div>
+                 <p class="text-orange-500 text-xs font-bold uppercase tracking-wider">Converting Format...</p>
+            </div>
+         </div>
     {/if}
 
 	<!-- Overlays -->

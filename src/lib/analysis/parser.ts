@@ -28,12 +28,13 @@ export interface ParsedLap {
     };
 }
 
-export function parseBoschExport(content: string): ParsedSession {
+export function parseBoschExport(content: string, userMapping?: Record<string, string>): ParsedSession {
     // PERFORMANCE: Pre-allocate and process more efficiently
     const lines = content.split('\n');
     const metadata = { track: 'Unknown', type: 'Unknown', date: new Date().toISOString() };
     let headerFound = false;
     let headers: string[] = [];
+    const usedHeaders = new Set<string>();
 
     console.log('[Parser] Bosch export - total lines:', lines.length);
 
@@ -57,6 +58,9 @@ export function parseBoschExport(content: string): ParsedSession {
         lat: [],
         long: []
     };
+
+    // Capture actual mapping
+    const finalChannelMapping: Record<string, string> = {};
 
     const laps: ParsedLap[] = [];
     let currentLapNum = 1;
@@ -104,12 +108,33 @@ export function parseBoschExport(content: string): ParsedSession {
         const values = trimmed.split(/\s+/);
         if (values.length < headers.length) continue;
 
-        const getVal = (name: string) => {
-            const idx = headers.findIndex(h => h.startsWith(name));
-            return idx !== -1 ? parseFloat(values[idx]) : 0;
+        const getMappedVal = (targetKey: string, defaultPrefix: string) => {
+            let colIndex = -1;
+            let usedHeader = '';
+
+            // 1. Check User Mapping
+            if (userMapping && userMapping[targetKey]) {
+                const mappedName = userMapping[targetKey];
+                colIndex = headers.indexOf(mappedName);
+                if (colIndex !== -1) usedHeader = mappedName;
+            }
+
+            // 2. Fallback to heuristic (starts with)
+            if (colIndex === -1) {
+                // Find first header starting with prefix
+                colIndex = headers.findIndex(h => h.toLowerCase().startsWith(defaultPrefix.toLowerCase()));
+                if (colIndex !== -1) usedHeader = headers[colIndex];
+            }
+
+            if (colIndex !== -1) {
+                if (!finalChannelMapping[targetKey]) finalChannelMapping[targetKey] = usedHeader;
+                usedHeaders.add(usedHeader);
+                return parseFloat(values[colIndex]);
+            }
+            return 0;
         };
 
-        const laptime = getVal('laptime');
+        const laptime = getMappedVal('laptime', 'laptime');
 
         if (laptime < lastLapTime - 1.0 && lastLapTime > 10) {
             // PERFORMANCE: Use Object spread instead of JSON parse/stringify
@@ -132,19 +157,28 @@ export function parseBoschExport(content: string): ParsedSession {
 
         // Push Standard Data
         currentLapTelemetry.time.push(laptime);
-        currentLapTelemetry.distance.push(getVal('xdist'));
-        currentLapTelemetry.speed.push(getVal('speed'));
-        currentLapTelemetry.rpm.push(getVal('nmot'));
-        currentLapTelemetry.throttle.push(getVal('aps'));
-        currentLapTelemetry.brake.push(getVal('pbrake_f'));
-        currentLapTelemetry.gear.push(getVal('gear'));
-        currentLapTelemetry.steering.push(getVal('SteeringAngle'));
+        currentLapTelemetry.distance.push(getMappedVal('distance', 'xdist'));
+        currentLapTelemetry.speed.push(getMappedVal('speed', 'speed'));
+        currentLapTelemetry.rpm.push(getMappedVal('rpm', 'nmot'));
+        currentLapTelemetry.throttle.push(getMappedVal('throttle', 'aps'));
+        currentLapTelemetry.brake.push(getMappedVal('brake', 'pbrake_f'));
+        currentLapTelemetry.gear.push(getMappedVal('gear', 'gear'));
+        currentLapTelemetry.steering.push(getMappedVal('steer', 'SteeringAngle'));
+
+        // Also map lat/long if they exist
+        // Bosch typically has x_position_gps / y_position_gps or similar, but simpler format assumes lat/long checks?
+        // Wait, standard Bosch export might not have simple lat/long columns.
+        // Assuming we rely on generic extra columns if not found.
 
         // Push All Raw Data
         headers.forEach((h, idx) => {
             const key = h.toLowerCase();
             const val = parseFloat(values[idx]);
+            // Only push if we are tracking this key in currentLapTelemetry (we initialized all headers)
             if (currentLapTelemetry[key]) {
+                // Avoid double-pushing? No, currentLapTelemetry[key] is separate from currentLapTelemetry.speed which is canonical.
+                // But if 'speed' column is pushed to 'speed' canonical channel, we ALSO push it to 'speed' raw channel?
+                // Yes, that's fine.
                 currentLapTelemetry[key].push(isNaN(val) ? 0 : val);
             }
         });
@@ -166,13 +200,12 @@ export function parseBoschExport(content: string): ParsedSession {
     if (laps.length > 0) {
         const firstLap = laps[0];
         console.log('[Parser] First lap telemetry keys:', Object.keys(firstLap.telemetry));
-        console.log('[Parser] GPS data - lat:', firstLap.telemetry.lat?.length, 'long:', firstLap.telemetry.long?.length);
     }
 
-    return { metadata: { ...metadata, columns: headers }, laps };
+    return { metadata: { ...metadata, columns: headers, channelMapping: finalChannelMapping }, laps };
 }
 
-export function parseVboExport(content: string): ParsedSession {
+export function parseVboExport(content: string, userMapping?: Record<string, string>): ParsedSession {
     const lines = content.split('\n');
     const metadata = { track: 'Unknown (VBOX)', type: 'Log', date: new Date().toISOString() };
 
@@ -221,37 +254,46 @@ export function parseVboExport(content: string): ParsedSession {
     }
 
     const lowerCols = columns.map(c => c.toLowerCase());
-    const findCol = (candidates: string[]) => lowerCols.findIndex(c => candidates.includes(c));
+
+    // Helper to find column index
+    const resolveCol = (key: string, candidates: string[]) => {
+        // 1. User Mapping
+        if (userMapping && userMapping[key]) {
+            const mappedName = userMapping[key].toLowerCase();
+            const idx = lowerCols.indexOf(mappedName);
+            if (idx !== -1) return idx;
+        }
+        // 2. Heuristic
+        return lowerCols.findIndex(c => candidates.includes(c));
+    };
 
     const colMap = {
-        time: findCol(['time', 't']),
-        lat: findCol(['lat', 'latitude', 'poslat']),
-        long: findCol(['long', 'lng', 'longitude', 'poslong']),
-        velocity: findCol(['velocity', 'speed', 'gps_speed', 'v', 'gpsspeed']),
-        rpm: findCol(['rpm', 'engine_speed', 'enginespeed', 'revs', 'nmot', 'engine_rpm', 'enginespd', 'eng_spd', 'enspd', 'ecurpm', 'engine', 'nengine']),
-        throttle: findCol(['throttle', 'throttle_position', 'throttleposition', 'pedal_position', 'pedalposition', 'pps', 'aps', 'accel_pedal', 'accelerator', 'thrpos', 'tp', 'thr', 'pedal', 'acc', 'accel', 'racceleratorpedal']),
-        brake: findCol(['brake', 'brake_position', 'brakeposition', 'brake_pressure', 'brakepressure', 'bpres', 'b_pres', 'b_pressure', 'pbrake_f', 'pbrake', 'brkpos', 'bp', 'brk', 'brakepress']),
-        steer: findCol(['steer', 'steering', 'steer_angle', 'steerangle', 'steering_angle', 'steeringangle', 'swa', 'handwheel_angle', 'wheel_angle', 'sw_angle', 'sa', 'str', 'steer_ang']),
-        lap: findCol(['lap-number', 'lap_number', 'lap']),
-        gear: findCol(['gear', 'current_gear', 'selected_gear', 'gear_no', 'ngear']),
-        avitime: findCol(['avitime', 'avi_time', 'video_time', 'videotime', 'synctime', 'avisynctime'])
+        time: resolveCol('time', ['time', 't']),
+        lat: resolveCol('lat', ['lat', 'latitude', 'poslat']),
+        long: resolveCol('long', ['long', 'lng', 'longitude', 'poslong']),
+        velocity: resolveCol('velocity', ['velocity', 'speed', 'gps_speed', 'v', 'gpsspeed']),
+        rpm: resolveCol('rpm', ['rpm', 'engine_speed', 'enginespeed', 'revs', 'nmot', 'engine_rpm', 'enginespd', 'eng_spd', 'enspd', 'ecurpm', 'engine', 'nengine']),
+        throttle: resolveCol('throttle', ['throttle', 'throttle_position', 'throttleposition', 'pedal_position', 'pedalposition', 'pps', 'aps', 'accel_pedal', 'accelerator', 'thrpos', 'tp', 'thr', 'pedal', 'acc', 'accel', 'racceleratorpedal']),
+        brake: resolveCol('brake', ['brake', 'brake_position', 'brakeposition', 'brake_pressure', 'brakepressure', 'bpres', 'b_pres', 'b_pressure', 'pbrake_f', 'pbrake', 'brkpos', 'bp', 'brk', 'brakepress']),
+        steer: resolveCol('steer', ['steer', 'steering', 'steer_angle', 'steerangle', 'steering_angle', 'steeringangle', 'swa', 'handwheel_angle', 'wheel_angle', 'sw_angle', 'sa', 'str', 'steer_ang']),
+        lap: resolveCol('lap', ['lap-number', 'lap_number', 'lap']),
+        gear: resolveCol('gear', ['gear', 'current_gear', 'selected_gear', 'gear_no', 'ngear']),
+        avitime: resolveCol('avitime', ['avitime', 'avi_time', 'video_time', 'videotime', 'synctime', 'avisynctime'])
     };
+
+    // Capture the actual mapping used for the UI
+    const finalChannelMapping: Record<string, string> = {};
+    for (const [key, idx] of Object.entries(colMap)) {
+        if (idx !== -1) {
+            finalChannelMapping[key] = columns[idx];
+        }
+    }
 
     // Track used columns to avoid duplication (strictly for extra columns logic)
     const usedIndices = new Set<number>();
-    if (colMap.velocity !== -1) usedIndices.add(colMap.velocity);
-    if (colMap.rpm !== -1) usedIndices.add(colMap.rpm);
-    if (colMap.throttle !== -1) usedIndices.add(colMap.throttle);
-    if (colMap.brake !== -1) usedIndices.add(colMap.brake);
-    if (colMap.steer !== -1) usedIndices.add(colMap.steer);
-
-    // Crucial: Add keys that are explicitly handled to usedIndices to prevent double-pushing
-    // (once as parsed data, and again as "extra" raw data if the column name matches).
-    if (colMap.lat !== -1) usedIndices.add(colMap.lat);
-    if (colMap.long !== -1) usedIndices.add(colMap.long);
-    if (colMap.time !== -1) usedIndices.add(colMap.time);
-    if (colMap.gear !== -1) usedIndices.add(colMap.gear);
-    if (colMap.avitime !== -1) usedIndices.add(colMap.avitime);
+    Object.values(colMap).forEach(idx => {
+        if (idx !== -1) usedIndices.add(idx);
+    });
 
     // Auto-Trim (Dead Data)
     let startIndex = 0;
@@ -507,5 +549,5 @@ export function parseVboExport(content: string): ParsedSession {
         }
     }
 
-    return { metadata: { ...metadata, columns, channelMapping: {} }, laps };
+    return { metadata: { ...metadata, columns, channelMapping: finalChannelMapping }, laps };
 }

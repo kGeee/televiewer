@@ -1,5 +1,31 @@
 import { pgTable, text, serial, integer, doublePrecision, boolean, jsonb, timestamp } from 'drizzle-orm/pg-core';
 
+export const cars = pgTable('cars', {
+    id: serial('id').primaryKey(),
+    name: text('name').notNull(),
+    make: text('make'),
+    model: text('model'),
+    year: integer('year'),
+    color: text('color').default('#ef4444'),
+    createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const car_channel_mappings = pgTable('car_channel_mappings', {
+    id: serial('id').primaryKey(),
+    carId: integer('car_id').references(() => cars.id).notNull(),
+    name: text('name').notNull(), // e.g. "Default VBOX", "Bosch Special"
+    mapping: jsonb('mapping').notNull(), // Key-value mapping
+    createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const telemetry_view_presets = pgTable('telemetry_view_presets', {
+    id: serial('id').primaryKey(),
+    name: text('name').notNull(),
+    carId: integer('car_id').references(() => cars.id), // null = global
+    config: jsonb('config').notNull(), // LayoutConfig[]
+    createdAt: timestamp('created_at').defaultNow(),
+});
+
 export const drivers = pgTable('drivers', {
     id: serial('id').primaryKey(),
     name: text('name').notNull(),
@@ -12,6 +38,7 @@ export const sessions = pgTable('sessions', {
     track: text('track').notNull(),
     date: text('date').notNull(), // Keep as text (ISO string) for simplicity
     driverId: integer('driver_id').references(() => drivers.id),
+    carId: integer('car_id').references(() => cars.id),
 
     airTemp: integer('air_temp'),
     trackTemp: integer('track_temp'),

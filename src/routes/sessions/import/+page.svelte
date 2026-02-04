@@ -24,8 +24,40 @@
 	// UI State
 	let reviewMode = $derived(reviewSessions.length > 0);
 	let editingSession: any = $state(null);
+    let mappingSession: any = $state(null); // Session being mapped
 	let recalculating = $state(false);
 	let uploadStatus = $state('');
+
+    function reparseWithMapping(session: any) {
+        if (!session || !session.metadata.channelMapping) return;
+        
+        // Find the file again
+        // We find it in the 'files' array by name matching session.notes which stores filename
+        // NOTE: 'session.notes' is set to fileName in worker success handler.
+        const file = files.find(f => f.name === session.notes);
+        if (!file) {
+            alert('Original file not found in memory. Please refresh and re-upload.');
+            return;
+        }
+
+        loading = true;
+        uploadStatus = 'Reprocessing with new mapping...';
+        mappingSession = null;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const text = e.target?.result as string;
+            parserWorker?.postMessage({ 
+                action: 'parse',
+                id: session.id, // Reuse ID to update existing session in list
+                file: { name: file.name, size: file.size }, 
+                text,
+                type: file.name.toLowerCase().endsWith('.vbo') ? 'vbo' : 'bosch',
+                mapping: JSON.parse(JSON.stringify(session.metadata.channelMapping)) // PASS MAPPING
+            });
+        };
+        reader.readAsText(file);
+    }
 
 	$effect(() => {
 		// Initialize Worker
@@ -52,7 +84,21 @@
 					trackConfig: { finishLine: null, sector1: null, sector2: null }
 				};
 				
-				reviewSessions = [...reviewSessions, sessionPreview];
+				// Update Review Session if exists (Reparse case)
+                const existingIdx = reviewSessions.findIndex(s => s.id === e.data.id);
+                if (existingIdx !== -1) {
+                    reviewSessions[existingIdx] = {
+                        ...reviewSessions[existingIdx],
+                        ...sessionPreview,
+                        // Preserve previous selections like driverId if not overridden? 
+                        // Actually better to reset derived data if file changed, but here file is same.
+                        driverId: reviewSessions[existingIdx].driverId
+                    };
+                    // Force reactivity
+                    reviewSessions = [...reviewSessions];
+                } else {
+				    reviewSessions = [...reviewSessions, sessionPreview];
+                }
 				// parsedSessions.push({ tempId: e.data.id, ...full }); // REMOVED optimization
 
 				loading = false;
@@ -101,6 +147,7 @@
 	});
 
 	function processFiles(fileList: File[]) {
+		files = [...files, ...fileList];
 		loading = true;
 		uploadStatus = 'Starting worker...';
 
@@ -221,9 +268,7 @@
 		}
 	}
 
-	function removeFile(index: number) {
-		files = files.filter((_, i) => i !== index);
-	}
+
 
 	function formatTime(sec: number) {
 		const m = Math.floor(sec / 60);
@@ -319,25 +364,37 @@
 								</p>
 								<div class="text-xs text-slate-500 italic">Source: {session.notes}</div>
 								
-								<button
-									class="mt-4 flex items-center gap-2 text-xs font-semibold px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded transition-colors"
-									onclick={() => {
-										console.log('Opening map config for session:', session.id);
-										// Ensure trackConfig exists to prevent binding errors
-										if (!session.trackConfig) {
-											session.trackConfig = { finishLine: null, sector1: null, sector2: null };
-										}
-										editingSession = session;
-									}}
-									disabled={!session.gpsData}
-									title={!session.gpsData ? 'No GPS data available for map' : ''}
-								>
-									<MapPin class="w-4 h-4" />
-									Preview Map
-									{#if session.gpsData?.lat}
-										<span class="text-[10px] opacity-50">({session.gpsData.lat.length} pts)</span>
-									{/if}
-								</button>
+								<div class="flex items-center gap-2 mt-4">
+                                    <button
+                                        class="flex items-center gap-2 text-xs font-semibold px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded transition-colors"
+                                        onclick={() => {
+                                            if (!session.trackConfig) {
+                                                session.trackConfig = { finishLine: null, sector1: null, sector2: null };
+                                            }
+                                            editingSession = session;
+                                        }}
+                                        disabled={!session.gpsData}
+                                        title={!session.gpsData ? 'No GPS data available for map' : ''}
+                                    >
+                                        <MapPin class="w-4 h-4" />
+                                        Preview Map
+                                        {#if session.gpsData?.lat}
+                                            <span class="text-[10px] opacity-50">({session.gpsData.lat.length} pts)</span>
+                                        {/if}
+                                    </button>
+
+                                    <!-- Channel Mapping Button -->
+                                    <button
+                                        class="flex items-center gap-2 text-xs font-semibold px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded transition-colors"
+                                        onclick={() => {
+                                            console.log('Opening mapping for session:', session.id, session.metadata);
+                                            mappingSession = session;
+                                        }}
+                                    >
+                                        <FileText class="w-4 h-4" />
+                                        Map Channels
+                                    </button>
+                                </div>
 							</div>
 
 							<!-- Driver Selection -->
@@ -413,6 +470,7 @@
 			
 			<!-- Map Config Modal (Read Only Preview) -->
 			{#if editingSession}
+				<!-- MAP PREVIEW MODAL -->
 				<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
 					<!-- svelte-ignore a11y_click_events_have_key_events -->
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -459,16 +517,101 @@
 							<p class="text-xs text-slate-400">
 								Note: Advanced track configuration is available after import.
 							</p>
-							<button
-								onclick={() => editingSession = null}
-								class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white font-semibold rounded-lg transition-colors"
-							>
-								Close Preview
-							</button>
+							<div class="flex gap-3">
+								<button
+									onclick={() => {
+										mappingSession = editingSession;
+										editingSession = null;
+									}}
+									class="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-semibold rounded-lg transition-colors"
+								>
+									<FileText class="w-4 h-4" />
+									Map Channels
+								</button>
+								<button
+									onclick={() => editingSession = null}
+									class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white font-semibold rounded-lg transition-colors"
+								>
+									Close Preview
+								</button>
+							</div>
 						</footer>
 					</div>
 				</div>
 			{/if}
+
+            {#if mappingSession}
+                <!-- CHANNEL MAPPING MODAL -->
+                <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" onclick={() => mappingSession = null}></div>
+                    <div class="relative w-full max-w-2xl bg-slate-900 rounded-xl shadow-2xl border border-slate-800 flex flex-col max-h-[90vh]" onclick={(e) => e.stopPropagation()}>
+                        <header class="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-900 rounded-t-xl">
+                            <div>
+                                <h3 class="text-xl font-bold text-white">Map Telemetry Channels</h3>
+                                <p class="text-sm text-slate-400">Confirm which file columns correspond to standard channels.</p>
+                            </div>
+                            <button onclick={() => mappingSession = null} class="text-slate-400 hover:text-white"><X class="w-6 h-6"/></button>
+                        </header>
+                        
+                        <div class="p-6 overflow-y-auto space-y-4">
+                            {#if mappingSession.metadata.columns}
+                                <div class="grid grid-cols-1 gap-4">
+                                    {#each ['velocity', 'rpm', 'throttle', 'brake', 'steer', 'gear', 'lat', 'long'] as channel}
+                                        <div class="flex items-center justify-between p-3 bg-slate-950 rounded border border-slate-800">
+                                            <div class="flex items-center gap-3">
+                                                 <span class="text-sm font-bold text-slate-300 capitalize w-24">{channel}</span>
+                                                 <!-- Status Indicator -->
+                                                 {#if mappingSession.metadata.channelMapping?.[channel]}
+                                                     <CheckCircle class="w-4 h-4 text-emerald-500" />
+                                                 {:else}
+                                                     <AlertCircle class="w-4 h-4 text-orange-500" />
+                                                 {/if}
+                                            </div>
+                                            
+                                            <select
+                                                value={mappingSession.metadata.channelMapping?.[channel] || ''}
+                                                onchange={(e) => {
+                                                    const val = e.currentTarget.value;
+                                                    // Update local mapping state for preview
+                                                    if (!mappingSession.metadata.channelMapping) mappingSession.metadata.channelMapping = {};
+                                                    mappingSession.metadata.channelMapping[channel] = val;
+                                                }}
+                                                class="bg-slate-800 border-slate-700 text-white text-sm rounded px-3 py-1 w-64 focus:border-orange-500"
+                                            >
+                                                <option value="">-- Not Mapped --</option>
+                                                {#each mappingSession.metadata.columns as col}
+                                                    <option value={col}>{col}</option>
+                                                {/each}
+                                            </select>
+                                        </div>
+                                    {/each}
+                                </div>
+                            {:else}
+                                <div class="text-center p-8 text-slate-500">
+                                    No column information available for this file.
+                                </div>
+                            {/if}
+                        </div>
+
+                        <footer class="p-4 border-t border-slate-800 flex justify-end gap-3 bg-slate-900 rounded-b-xl">
+                            <button
+                                onclick={() => mappingSession = null}
+                                class="px-4 py-2 text-slate-400 hover:text-white"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onclick={() => reparseWithMapping(mappingSession)}
+                                class="px-6 py-2 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded"
+                            >
+                                Apply & Reprocess
+                            </button>
+                        </footer>
+                    </div>
+                </div>
+            {/if}
 
 		{/if}
 	</div>
